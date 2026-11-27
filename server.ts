@@ -852,14 +852,14 @@ function chooseBestLudoToken(
 
 // Daily Spin Wheel segments (server-authoritative weighted RNG)
 const SPIN_SEGMENTS = [
-  { reward: 250, label: '250', weight: 28 },
-  { reward: 500, label: '500', weight: 24 },
-  { reward: 750, label: '750', weight: 18 },
-  { reward: 1000, label: '1,000', weight: 12 },
-  { reward: 1500, label: '1.5K', weight: 8 },
-  { reward: 2500, label: '2.5K', weight: 5 },
-  { reward: 4000, label: '4K', weight: 3 },
-  { reward: 5000, label: '5K JACKPOT', weight: 2 },
+  { reward: 5, label: '5', weight: 28 },
+  { reward: 10, label: '10', weight: 24 },
+  { reward: 15, label: '15', weight: 18 },
+  { reward: 20, label: '20', weight: 12 },
+  { reward: 30, label: '30', weight: 8 },
+  { reward: 50, label: '50', weight: 5 },
+  { reward: 75, label: '75', weight: 3 },
+  { reward: 100, label: '100', weight: 2 },
 ];
 
 function isSafeHttpsUrl(raw: string): boolean {
@@ -872,9 +872,640 @@ function isSafeHttpsUrl(raw: string): boolean {
   }
 }
 
+// --- Custom Mobile / Email + Password Auth & Session Store (scrypt + HMAC-SHA256) ---
+const AUTH_SESSION_SECRET =
+  (process.env.AUTH_SESSION_SECRET || '').trim() || crypto.randomBytes(32).toString('hex');
+const AUTH_COOKIE_NAME = 'aurelia_session';
+const AUTH_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTH_STREAK_REWARDS = [5, 10, 15, 20, 30, 40, 50];
+
+interface ServerAccountRecord {
+  uid: string;
+  fullName: string;
+  username: string;
+  email: string;
+  mobile: string;
+  passwordSalt: string;
+  passwordHash: string;
+  avatarSeed: string;
+  depositBalance: number;
+  winningBalance: number;
+  bonusBalance: number;
+  totalDeposited: number;
+  totalWagered: number;
+  gamesPlayed: number;
+  wins: number;
+  totalWon: number;
+  winRate: number;
+  weeklyScore: number;
+  monthlyScore: number;
+  streakDays: number;
+  lastDailyClaimDate: string;
+  lastSpinDate: string;
+  referralCode: string;
+  referredBy: string;
+  soundEnabled: boolean;
+  musicEnabled: boolean;
+  volume: number;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+const accountsByUid = new Map<string, ServerAccountRecord>();
+const uidByEmail = new Map<string, string>();
+const uidByMobile = new Map<string, string>();
+const authRateMap = new Map<string, { count: number; resetAtMs: number }>();
+
+function hashPasswordScrypt(password: string, saltHex?: string): { salt: string; hash: string } {
+  const salt = saltHex || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return { salt, hash: derived };
+}
+
+function verifyPasswordScrypt(password: string, salt: string, expectedHash: string): boolean {
+  try {
+    const actual = crypto.scryptSync(password, salt, 64);
+    const expected = Buffer.from(expectedHash, 'hex');
+    if (actual.length !== expected.length) return false;
+    return crypto.timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function signSessionToken(uid: string): string {
+  const payloadObj = { uid, exp: Date.now() + AUTH_SESSION_TTL_MS };
+  const payloadB64 = Buffer.from(JSON.stringify(payloadObj), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', AUTH_SESSION_SECRET)
+    .update(payloadB64)
+    .digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifySessionToken(token: string): string | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [payloadB64, sig] = parts;
+    if (!payloadB64 || !sig) return null;
+    const expectedSig = crypto
+      .createHmac('sha256', AUTH_SESSION_SECRET)
+      .update(payloadB64)
+      .digest('base64url');
+    const sigBuf = Buffer.from(sig, 'utf8');
+    const expBuf = Buffer.from(expectedSig, 'utf8');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      uid?: string;
+      exp?: number;
+    };
+    if (!parsed.uid || typeof parsed.exp !== 'number' || Date.now() > parsed.exp) {
+      return null;
+    }
+    return parsed.uid;
+  } catch {
+    return null;
+  }
+}
+
+function parseCookies(req: express.Request): Record<string, string> {
+  const header = req.headers.cookie;
+  if (!header) return {};
+  const out: Record<string, string> = {};
+  for (const part of header.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = part.slice(0, eqIdx).trim();
+    const val = part.slice(eqIdx + 1).trim();
+    if (key) {
+      try {
+        out[key] = decodeURIComponent(val);
+      } catch {
+        out[key] = val;
+      }
+    }
+  }
+  return out;
+}
+
+function isHttpsRequest(req: express.Request): boolean {
+  const proto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  return req.secure || proto === 'https';
+}
+
+function setAuthSessionCookie(req: express.Request, res: express.Response, token: string): void {
+  const isHttps = isHttpsRequest(req);
+  res.cookie(AUTH_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: isHttps,
+    sameSite: isHttps ? 'none' : 'lax',
+    ...(isHttps ? { partitioned: true } : {}),
+    maxAge: AUTH_SESSION_TTL_MS,
+    path: '/',
+  });
+}
+
+function clearAuthSessionCookie(req: express.Request, res: express.Response): void {
+  const isHttps = isHttpsRequest(req);
+  res.clearCookie(AUTH_COOKIE_NAME, {
+    httpOnly: true,
+    secure: isHttps,
+    sameSite: isHttps ? 'none' : 'lax',
+    ...(isHttps ? { partitioned: true } : {}),
+    path: '/',
+  });
+}
+
+function isSameOriginOrCustomHeader(req: express.Request): boolean {
+  if (req.headers.authorization?.startsWith('Bearer ')) return true;
+  if (String(req.headers['x-requested-with'] || '').toLowerCase() === 'xmlhttprequest') {
+    return true;
+  }
+  const origin = String(req.headers.origin || '').trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').trim();
+  if (!origin || !host) return false;
+  try {
+    return new URL(origin).host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+function resolveSessionAccount(req: express.Request): ServerAccountRecord | null {
+  const authHeader = String(req.headers.authorization || '');
+  let token = '';
+  if (authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice('Bearer '.length).trim();
+  } else {
+    const cookies = parseCookies(req);
+    token = cookies[AUTH_COOKIE_NAME] || '';
+  }
+  if (!token) return null;
+  const uid = verifySessionToken(token);
+  if (!uid) return null;
+  return accountsByUid.get(uid) || null;
+}
+
+function serializeAccount(acc: ServerAccountRecord) {
+  const totalBalance = acc.depositBalance + acc.winningBalance + acc.bonusBalance;
+  return {
+    profile: {
+      uid: acc.uid,
+      username: acc.username,
+      avatarSeed: acc.avatarSeed,
+      balance: totalBalance,
+      depositBalance: acc.depositBalance,
+      winningBalance: acc.winningBalance,
+      bonusBalance: acc.bonusBalance,
+      totalDeposited: acc.totalDeposited,
+      totalWagered: acc.totalWagered,
+      gamesPlayed: acc.gamesPlayed,
+      wins: acc.wins,
+      totalWon: acc.totalWon,
+      winRate: acc.winRate,
+      weeklyScore: acc.weeklyScore,
+      monthlyScore: acc.monthlyScore,
+      streakDays: acc.streakDays,
+      badges: [],
+      status: 'active' as const,
+      createdAt: acc.createdAtIso,
+      updatedAt: acc.updatedAtIso,
+    },
+    privateUser: {
+      uid: acc.uid,
+      email: acc.email || (acc.mobile ? `+91 ${acc.mobile}` : ''),
+      displayName: acc.fullName,
+      username: acc.username,
+      role: 'player' as const,
+      welcomeBonusClaimed: true,
+      lastDailyClaimDate: acc.lastDailyClaimDate,
+      lastSpinDate: acc.lastSpinDate,
+      streakDays: acc.streakDays,
+      claimedMissions: [],
+      referralCode: acc.referralCode,
+      referredBy: acc.referredBy,
+      referralRewardUnlocked: false,
+      lastWithdrawalAtMs: 0,
+      dailyWithdrawnDate: '',
+      dailyWithdrawnTotal: 0,
+      graphicsQuality: 'ultra' as const,
+      soundEnabled: acc.soundEnabled,
+      musicEnabled: acc.musicEnabled,
+      volume: acc.volume,
+      createdAt: acc.createdAtIso,
+      updatedAt: acc.updatedAtIso,
+    },
+    mobile: acc.mobile,
+    fullName: acc.fullName,
+  };
+}
+
+function normalizeMobileInput(raw: string): string {
+  const digits = raw.replace(/[\s\-()]/g, '');
+  if (digits.startsWith('+91')) return digits.slice(3);
+  if (digits.startsWith('91') && digits.length === 12) return digits.slice(2);
+  return digits;
+}
+
+function makeServerReferralCode(uid: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < uid.length; i++) {
+    hash ^= uid.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const code = (hash >>> 0).toString(36).toUpperCase().padStart(6, '0');
+  return `AUR${code.slice(0, 6)}`;
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '128kb' }));
+
+  // Auth Rate-Limit Helper
+  const checkAuthRateLimit = (req: express.Request, res: express.Response): boolean => {
+    const ip = String(req.headers['x-forwarded-for'] || req.ip || 'local').split(',')[0].trim();
+    const now = Date.now();
+    const entry = authRateMap.get(ip);
+    if (entry && now < entry.resetAtMs && entry.count >= 25) {
+      res.status(429).json({ ok: false, error: 'Too many authentication attempts. Please wait a minute.' });
+      return false;
+    }
+    if (!entry || now >= entry.resetAtMs) {
+      authRateMap.set(ip, { count: 1, resetAtMs: now + 60_000 });
+    } else {
+      entry.count += 1;
+    }
+    return true;
+  };
+
+  // Sign Up: Full Name, 10-digit Indian Mobile (+91) or Email, Password, optional Referral Code
+  app.post('/api/auth/register', (req, res) => {
+    if (!checkAuthRateLimit(req, res)) return;
+    const body = (req.body || {}) as {
+      fullName?: unknown;
+      contactType?: unknown;
+      mobile?: unknown;
+      email?: unknown;
+      password?: unknown;
+      referralCode?: unknown;
+    };
+
+    const fullName = String(body.fullName || '').replace(/[\r\n\t]/g, ' ').trim();
+    if (fullName.length < 2 || fullName.length > 64) {
+      res.status(400).json({ ok: false, error: 'Please enter your full name (2–64 characters).' });
+      return;
+    }
+
+    const contactType = body.contactType === 'email' ? 'email' : 'mobile';
+    let cleanMobile = '';
+    let cleanEmail = '';
+
+    if (contactType === 'mobile') {
+      cleanMobile = normalizeMobileInput(String(body.mobile || ''));
+      if (!/^\d{10}$/.test(cleanMobile)) {
+        res.status(400).json({
+          ok: false,
+          error: 'Enter a valid 10-digit Indian mobile number (+91).',
+        });
+        return;
+      }
+      if (uidByMobile.has(cleanMobile)) {
+        res.status(409).json({
+          ok: false,
+          error: 'An account with this mobile number already exists. Please log in.',
+        });
+        return;
+      }
+    } else {
+      cleanEmail = String(body.email || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleanEmail) || cleanEmail.length > 160) {
+        res.status(400).json({ ok: false, error: 'Enter a valid email address.' });
+        return;
+      }
+      if (uidByEmail.has(cleanEmail)) {
+        res.status(409).json({
+          ok: false,
+          error: 'An account with this email already exists. Please log in.',
+        });
+        return;
+      }
+    }
+
+    const password = String(body.password || '');
+    if (password.length < 6 || password.length > 128) {
+      res.status(400).json({ ok: false, error: 'Password must be between 6 and 128 characters.' });
+      return;
+    }
+
+    const cleanRef = String(body.referralCode || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+    if (cleanRef.length > 0 && (cleanRef.length < 4 || cleanRef.length > 24)) {
+      res.status(400).json({ ok: false, error: 'Referral code must be 4–24 alphanumeric characters.' });
+      return;
+    }
+
+    const uid = `usr_${crypto.randomBytes(10).toString('hex')}`;
+    const cleanedUsername = fullName.replace(/[^a-zA-Z0-9 _.-]/g, '').trim().slice(0, 28);
+    const username = cleanedUsername.length >= 2 ? cleanedUsername : `Player_${uid.slice(-4).toUpperCase()}`;
+    const { salt, hash } = hashPasswordScrypt(password);
+    const nowIso = new Date().toISOString();
+
+    // Initialize new users with 0 deposited balance and 0 free starting coins
+    const account: ServerAccountRecord = {
+      uid,
+      fullName,
+      username,
+      email: cleanEmail,
+      mobile: cleanMobile,
+      passwordSalt: salt,
+      passwordHash: hash,
+      avatarSeed: username.slice(0, 16),
+      depositBalance: 0,
+      winningBalance: 0,
+      bonusBalance: 0,
+      totalDeposited: 0,
+      totalWagered: 0,
+      gamesPlayed: 0,
+      wins: 0,
+      totalWon: 0,
+      winRate: 0,
+      weeklyScore: 0,
+      monthlyScore: 0,
+      streakDays: 0,
+      lastDailyClaimDate: '',
+      lastSpinDate: '',
+      referralCode: makeServerReferralCode(uid),
+      referredBy: cleanRef,
+      soundEnabled: true,
+      musicEnabled: false,
+      volume: 0.65,
+      createdAtIso: nowIso,
+      updatedAtIso: nowIso,
+    };
+
+    accountsByUid.set(uid, account);
+    if (cleanEmail) uidByEmail.set(cleanEmail, uid);
+    if (cleanMobile) uidByMobile.set(cleanMobile, uid);
+
+    const sessionToken = signSessionToken(uid);
+    setAuthSessionCookie(req, res, sessionToken);
+    res.status(201).json({
+      ok: true,
+      sessionToken,
+      user: serializeAccount(account),
+    });
+  });
+
+  // Login: Mobile Number / Email + Password
+  app.post('/api/auth/login', (req, res) => {
+    if (!checkAuthRateLimit(req, res)) return;
+    const body = (req.body || {}) as {
+      identifier?: unknown;
+      password?: unknown;
+    };
+
+    const rawId = String(body.identifier || '').trim();
+    const password = String(body.password || '');
+
+    if (!rawId) {
+      res.status(400).json({ ok: false, error: 'Enter your 10-digit mobile number or email.' });
+      return;
+    }
+    if (password.length < 6) {
+      res.status(400).json({ ok: false, error: 'Password must be at least 6 characters.' });
+      return;
+    }
+
+    let uid: string | undefined;
+    if (rawId.includes('@')) {
+      const cleanEmail = rawId.toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleanEmail)) {
+        res.status(400).json({ ok: false, error: 'Enter a valid email address.' });
+        return;
+      }
+      uid = uidByEmail.get(cleanEmail);
+    } else {
+      const cleanMobile = normalizeMobileInput(rawId);
+      if (!/^\d{10}$/.test(cleanMobile)) {
+        res.status(400).json({ ok: false, error: 'Enter a valid 10-digit mobile number or email.' });
+        return;
+      }
+      uid = uidByMobile.get(cleanMobile);
+    }
+
+    const account = uid ? accountsByUid.get(uid) : undefined;
+    if (!account || !verifyPasswordScrypt(password, account.passwordSalt, account.passwordHash)) {
+      res.status(401).json({ ok: false, error: 'Invalid mobile number/email or password.' });
+      return;
+    }
+
+    const sessionToken = signSessionToken(account.uid);
+    setAuthSessionCookie(req, res, sessionToken);
+    res.json({
+      ok: true,
+      sessionToken,
+      user: serializeAccount(account),
+    });
+  });
+
+  app.get('/api/auth/session', (req, res) => {
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.json({ ok: true, authenticated: false, user: null });
+      return;
+    }
+    res.json({ ok: true, authenticated: true, user: serializeAccount(account) });
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    clearAuthSessionCookie(req, res);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/account/profile', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+    const body = (req.body || {}) as {
+      username?: unknown;
+      avatarSeed?: unknown;
+      soundEnabled?: unknown;
+      musicEnabled?: unknown;
+      volume?: unknown;
+    };
+    if (typeof body.username === 'string') {
+      const cleaned = body.username.replace(/[^a-zA-Z0-9 _.-]/g, '').trim().slice(0, 28);
+      if (cleaned.length >= 2) account.username = cleaned;
+    }
+    if (typeof body.avatarSeed === 'string' && body.avatarSeed.trim().length > 0) {
+      account.avatarSeed = body.avatarSeed.trim().slice(0, 32);
+    }
+    if (typeof body.soundEnabled === 'boolean') account.soundEnabled = body.soundEnabled;
+    if (typeof body.musicEnabled === 'boolean') account.musicEnabled = body.musicEnabled;
+    if (typeof body.volume === 'number' && Number.isFinite(body.volume)) {
+      account.volume = Math.max(0, Math.min(1, body.volume));
+    }
+    account.updatedAtIso = new Date().toISOString();
+    res.json({ ok: true, user: serializeAccount(account) });
+  });
+
+  app.post('/api/account/bet', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+    const wager = Math.floor(Number((req.body || {}).amount) || 0);
+    if (wager <= 0 || wager > 10_000_000) {
+      res.status(400).json({ ok: false, error: 'Invalid wager amount.' });
+      return;
+    }
+    const cashAvailable = account.depositBalance + account.winningBalance;
+    const totalAvailable = cashAvailable + account.bonusBalance;
+    if (totalAvailable < wager) {
+      res.status(400).json({ ok: false, error: 'Insufficient balance. Please deposit coins in Wallet.' });
+      return;
+    }
+
+    const isStarterBonusPlay = cashAvailable <= 0 && wager <= BONUS_STARTER_TABLE_MAX_STAKE;
+    const maxBonusAllowed = isStarterBonusPlay
+      ? Math.min(account.bonusBalance, wager)
+      : Math.min(account.bonusBalance, Math.floor(wager * BONUS_MAX_CONTRIBUTION_RATIO));
+
+    if (cashAvailable + maxBonusAllowed < wager) {
+      res.status(400).json({
+        ok: false,
+        error: 'Cash balance too low: bonus covers up to 20% of bets (100% on <=10 starter stakes when cash is 0).',
+      });
+      return;
+    }
+
+    let remaining = wager;
+    const fromBonus = Math.min(maxBonusAllowed, remaining);
+    remaining -= fromBonus;
+    const fromDeposit = Math.min(account.depositBalance, remaining);
+    remaining -= fromDeposit;
+    const fromWinning = Math.min(account.winningBalance, remaining);
+    remaining -= fromWinning;
+    if (remaining > 0) {
+      res.status(400).json({ ok: false, error: 'Insufficient balance.' });
+      return;
+    }
+
+    account.bonusBalance -= fromBonus;
+    account.depositBalance -= fromDeposit;
+    account.winningBalance -= fromWinning;
+    account.totalWagered += wager;
+    account.updatedAtIso = new Date().toISOString();
+
+    res.json({
+      ok: true,
+      nextBalance: account.depositBalance + account.winningBalance + account.bonusBalance,
+      user: serializeAccount(account),
+    });
+  });
+
+  app.post('/api/account/settle', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+    const body = (req.body || {}) as {
+      betAmount?: unknown;
+      payout?: unknown;
+      outcome?: unknown;
+    };
+    const betAmount = Math.max(0, Math.round(Number(body.betAmount) || 0));
+    const payout = Math.max(0, Math.min(10_000_000, Math.round(Number(body.payout) || 0)));
+    const isTieRefund = body.outcome === 'tie' && payout === betAmount;
+
+    if (isTieRefund) {
+      account.depositBalance += payout;
+    } else if (payout > 0) {
+      const capPreDeposit = account.totalDeposited < MIN_FIRST_DEPOSIT_FOR_WITHDRAW;
+      if (capPreDeposit) {
+        account.winningBalance = Math.min(BONUS_PRE_DEPOSIT_WIN_CAP, account.winningBalance + payout);
+      } else {
+        account.winningBalance += payout;
+      }
+    }
+
+    account.gamesPlayed += 1;
+    if (body.outcome === 'win' && payout > 0) {
+      account.wins += 1;
+      account.totalWon += payout;
+    }
+    account.winRate = account.gamesPlayed > 0 ? Math.round((account.wins / account.gamesPlayed) * 1000) / 10 : 0;
+    account.weeklyScore += payout;
+    account.monthlyScore += payout;
+    account.updatedAtIso = new Date().toISOString();
+
+    res.json({
+      ok: true,
+      nextBalance: account.depositBalance + account.winningBalance + account.bonusBalance,
+      user: serializeAccount(account),
+    });
+  });
+
+  app.post('/api/account/daily-claim', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+    const today = todayDateKey();
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    if (account.lastDailyClaimDate === today) {
+      res.status(400).json({ ok: false, error: 'Daily reward already claimed today' });
+      return;
+    }
+    const nextStreak = account.lastDailyClaimDate === yesterday ? account.streakDays + 1 : 1;
+    const reward = AUTH_STREAK_REWARDS[(nextStreak - 1) % AUTH_STREAK_REWARDS.length];
+    account.lastDailyClaimDate = today;
+    account.streakDays = nextStreak;
+    account.bonusBalance += reward;
+    account.weeklyScore += reward;
+    account.monthlyScore += reward;
+    account.updatedAtIso = new Date().toISOString();
+    res.json({
+      ok: true,
+      reward,
+      streakDays: nextStreak,
+      nextBalance: account.depositBalance + account.winningBalance + account.bonusBalance,
+      user: serializeAccount(account),
+    });
+  });
 
   // Health & APK config endpoint
   app.get('/api/health', (_req, res) => {

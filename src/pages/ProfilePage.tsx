@@ -5,12 +5,12 @@ import { AvatarBadge } from '../components/AvatarBadge';
 import { GraphicsAudioBar } from '../components/GraphicsAudioBar';
 import { VipTierCard } from '../components/VipTierCard';
 import { useApp } from '../context/AppContext';
-import { BADGE_CATALOG, updateUserProfileAndSettings } from '../services/walletService';
+import { BADGE_CATALOG } from '../services/walletService';
 
 const AVATAR_SEEDS = ['Aurelia', 'Dragon', 'Valkyrie', 'Obsidian', 'Zenith', 'Sovereign'];
 
 export default function ProfilePage() {
-  const { firebaseUser, profile, privateUser, isAdmin, isGuestMode, logout, pushToast } = useApp();
+  const { firebaseUser, isAuthenticated, profile, privateUser, isAdmin, logout, updateAccountProfile, pushToast } = useApp();
   const [username, setUsername] = useState(profile?.username || '');
   const [avatarSeed, setAvatarSeed] = useState(profile?.avatarSeed || 'Aurelia');
   const [saving, setSaving] = useState(false);
@@ -24,10 +24,10 @@ export default function ProfilePage() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firebaseUser || isGuestMode) return;
+    if (!isAuthenticated) return;
     setSaving(true);
     try {
-      await updateUserProfileAndSettings(firebaseUser.uid, { username, avatarSeed });
+      await updateAccountProfile({ username, avatarSeed });
       pushToast('Profile settings saved.', 'emerald');
     } catch (err) {
       pushToast(err instanceof Error ? err.message : 'Unable to save profile', 'crimson');
@@ -36,7 +36,7 @@ export default function ProfilePage() {
     }
   };
 
-  if (!firebaseUser || isGuestMode) {
+  if (!isAuthenticated) {
     return (
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-14 space-y-6">
         <div className="surface-panel rounded-2xl p-8 text-center space-y-5">
@@ -90,7 +90,7 @@ export default function ProfilePage() {
               {profile?.username}
             </h1>
             <div className="text-xs text-zinc-400 mt-0.5">
-              {privateUser?.email || firebaseUser.email}
+              {privateUser?.email || firebaseUser?.email || 'Verified Member'}
               {isAdmin && (
                 <>
                   <span className="mx-1.5">·</span>
@@ -114,10 +114,10 @@ export default function ProfilePage() {
           <button
             type="button"
             onClick={() => void logout()}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 text-xs font-medium text-zinc-200"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-rose-500/35 bg-rose-950/35 hover:bg-rose-900/50 text-xs font-semibold text-rose-200"
           >
             <LogOut className="w-4 h-4" />
-            <span>Sign Out</span>
+            <span>Logout</span>
           </button>
         </div>
       </div>

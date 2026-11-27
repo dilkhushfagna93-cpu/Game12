@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
@@ -11,7 +11,6 @@ import {
   type User,
 } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
-import { INITIAL_VIRTUAL_COINS } from '../config/assets';
 import {
   checkIsAdmin,
   DEFAULT_GAME_CONFIGS,
@@ -36,7 +35,7 @@ import {
 import { soundEngine } from '../services/soundEngine';
 import {
   applyReferralCode,
-  calculateBetSplit,
+  claimDailyLoginReward,
   ensureUserProvisioned,
   extractWalletBuckets,
   placeAtomicBet,
@@ -60,10 +59,19 @@ export interface ToastNotice {
   message: string;
 }
 
+export interface SessionAccountData {
+  profile: PublicProfile;
+  privateUser: UserPrivate;
+  mobile: string;
+  fullName: string;
+}
+
 const PENDING_REF_STORAGE_KEY = 'aurelia_pending_ref_code';
 
 interface AppContextValue {
   firebaseUser: User | null;
+  sessionUser: SessionAccountData | null;
+  isAuthenticated: boolean;
   authReady: boolean;
   isAdmin: boolean;
   profile: PublicProfile | null;
@@ -86,6 +94,17 @@ interface AppContextValue {
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   registerWithEmail: (email: string, password: string, username: string, referralCode?: string) => Promise<void>;
+  loginWithCredentials: (identifier: string, password: string) => Promise<void>;
+  registerWithCredentials: (params: {
+    fullName: string;
+    contactType: 'mobile' | 'email';
+    mobile?: string;
+    email?: string;
+    password: string;
+    referralCode?: string;
+  }) => Promise<void>;
+  updateAccountProfile: (opts: { username: string; avatarSeed: string }) => Promise<void>;
+  claimDailyCheckIn: () => Promise<{ reward: number; streakDays: number; nextBalance: number }>;
   sendResetPassword: (email: string) => Promise<void>;
   logout: () => Promise<void>;
   placeBet: (game: GameId, amount: number, roundId: string, description: string) => Promise<number>;
@@ -115,16 +134,14 @@ function isValidHttps(url: string): boolean {
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [profile, setProfile] = useState<PublicProfile | null>(null);
-  const [privateUser, setPrivateUser] = useState<UserPrivate | null>(null);
+  const [firebaseAuthReady, setFirebaseAuthReady] = useState(false);
+  const [sessionAuthReady, setSessionAuthReady] = useState(false);
+  const [sessionUser, setSessionUser] = useState<SessionAccountData | null>(null);
+  const sessionTokenRef = useRef<string | null>(null);
 
-  const [guestBuckets, setGuestBuckets] = useState({
-    depositBalance: 8000,
-    winningBalance: 0,
-    bonusBalance: INITIAL_VIRTUAL_COINS - 8000,
-  });
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [firestoreProfile, setFirestoreProfile] = useState<PublicProfile | null>(null);
+  const [firestorePrivateUser, setFirestorePrivateUser] = useState<UserPrivate | null>(null);
 
   // Graphics quality is permanently locked to 'ultra' across all games
   const graphicsQuality: GraphicsQuality = 'ultra';
@@ -159,6 +176,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  const authFetch = useCallback(async (url: string, body?: unknown, method = 'POST') => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+    if (sessionTokenRef.current) {
+      headers.Authorization = `Bearer ${sessionTokenRef.current}`;
+    }
+    return fetch(url, {
+      method,
+      credentials: 'include',
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }, []);
+
   // Capture ?ref=CODE from URL on initial landing
   useEffect(() => {
     try {
@@ -170,6 +203,44 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore storage issues
     }
+  }, []);
+
+  // Hydrate server cookie session on app mount
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/auth/session', {
+      method: 'GET',
+      credentials: 'include',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    })
+      .then(async (resp) => {
+        if (!resp.ok) return null;
+        return (await resp.json()) as {
+          authenticated?: boolean;
+          user?: SessionAccountData | null;
+        };
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (data?.authenticated && data.user) {
+          setSessionUser(data.user);
+          setSoundEnabled(data.user.privateUser.soundEnabled);
+          setMusicEnabled(data.user.privateUser.musicEnabled);
+          setVolume(data.user.privateUser.volume);
+          soundEngine.configure({
+            soundEnabled: data.user.privateUser.soundEnabled,
+            musicEnabled: data.user.privateUser.musicEnabled,
+            volume: data.user.privateUser.volume,
+          });
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setSessionAuthReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const refreshConfigs = useCallback(async () => {
@@ -253,10 +324,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setFirebaseUser(user);
 
       if (!user) {
-        setProfile(null);
-        setPrivateUser(null);
+        setFirestoreProfile(null);
+        setFirestorePrivateUser(null);
         setIsAdmin(false);
-        setAuthReady(true);
+        setFirebaseAuthReady(true);
         return;
       }
 
@@ -278,8 +349,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             });
             if (sessionToken !== activeSession) return true;
             hydratedRole = provisioned.privateUser.role;
-            setProfile(provisioned.profile);
-            setPrivateUser(provisioned.privateUser);
+            setFirestoreProfile(provisioned.profile);
+            setFirestorePrivateUser(provisioned.privateUser);
             if (rootAdmin || provisioned.privateUser.role === 'admin') {
               setIsAdmin(true);
             }
@@ -291,14 +362,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               musicEnabled: provisioned.privateUser.musicEnabled,
               volume: provisioned.privateUser.volume,
             });
-
-            if (provisioned.welcomeBonusGranted > 0) {
-              soundEngine.playCoinReward();
-              pushToast(
-                `Welcome Bonus! ₹${provisioned.welcomeBonusGranted} added to your Bonus Wallet.`,
-                'emerald',
-              );
-            }
 
             // Auto-link pending referral code from URL or signup form if account has no referrer yet
             try {
@@ -348,7 +411,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         unsubPub = onSnapshot(
           doc(db, 'publicProfiles', user.uid),
           (snap) => {
-            if (snap.exists()) setProfile(snap.data() as PublicProfile);
+            if (snap.exists()) setFirestoreProfile(snap.data() as PublicProfile);
           },
           (error) => {
             if (!isFirestoreOfflineError(error)) {
@@ -362,7 +425,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           (snap) => {
             if (snap.exists()) {
               const p = snap.data() as UserPrivate;
-              setPrivateUser(p);
+              setFirestorePrivateUser(p);
               if (p.role === 'admin' || rootAdmin) {
                 setIsAdmin(true);
               }
@@ -379,7 +442,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const adminFlag = await checkIsAdmin(user.uid, user.email, user.emailVerified, hydratedRole);
       if (sessionToken === activeSession) {
         setIsAdmin(adminFlag);
-        setAuthReady(true);
+        setFirebaseAuthReady(true);
         if (adminFlag) {
           void syncAdminRoleToUserDoc(user.uid, user.email);
           void verifyAdminSessionWithServer();
@@ -412,9 +475,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       soundEngine.configure(opts);
       if (firebaseUser && (firebaseUser.emailVerified || isRootAdminEmail(firebaseUser.email))) {
         void updateUserProfileAndSettings(firebaseUser.uid, opts).catch(() => {});
+      } else if (sessionUser) {
+        void authFetch('/api/account/profile', opts)
+          .then(async (resp) => {
+            if (!resp.ok) return;
+            const data = (await resp.json()) as { user?: SessionAccountData };
+            if (data.user) setSessionUser(data.user);
+          })
+          .catch(() => {});
       }
     },
-    [firebaseUser],
+    [authFetch, firebaseUser, sessionUser],
   );
 
   const signInWithGoogle = useCallback(async () => {
@@ -453,6 +524,53 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [pushToast],
   );
 
+  const loginWithCredentials = useCallback(
+    async (identifier: string, password: string) => {
+      const resp = await authFetch('/api/auth/login', { identifier, password });
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        sessionToken?: string;
+        user?: SessionAccountData;
+      };
+      if (!resp.ok || !data.ok || !data.user) {
+        throw new Error(data.error || 'Invalid mobile number/email or password.');
+      }
+      sessionTokenRef.current = data.sessionToken || null;
+      setSessionUser(data.user);
+      soundEngine.playCoinReward();
+      pushToast(`Welcome back, ${data.user.profile.username}!`, 'emerald');
+    },
+    [authFetch, pushToast],
+  );
+
+  const registerWithCredentials = useCallback(
+    async (params: {
+      fullName: string;
+      contactType: 'mobile' | 'email';
+      mobile?: string;
+      email?: string;
+      password: string;
+      referralCode?: string;
+    }) => {
+      const resp = await authFetch('/api/auth/register', params);
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        sessionToken?: string;
+        user?: SessionAccountData;
+      };
+      if (!resp.ok || !data.ok || !data.user) {
+        throw new Error(data.error || 'Unable to create account.');
+      }
+      sessionTokenRef.current = data.sessionToken || null;
+      setSessionUser(data.user);
+      soundEngine.playCoinReward();
+      pushToast(`Account created for ${data.user.profile.username}!`, 'emerald');
+    },
+    [authFetch, pushToast],
+  );
+
   const sendResetPassword = useCallback(
     async (email: string) => {
       await sendPasswordResetEmail(auth, email.trim());
@@ -462,51 +580,126 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    await signOut(auth);
+    sessionTokenRef.current = null;
+    setSessionUser(null);
+    setFirestoreProfile(null);
+    setFirestorePrivateUser(null);
+    setIsAdmin(false);
+    await authFetch('/api/auth/logout', {}).catch(() => {});
+    if (auth.currentUser) {
+      await signOut(auth).catch(() => {});
+    }
     soundEngine.stopEngine();
     pushToast('Signed out of Aurelia Arena.', 'neutral');
-  }, [pushToast]);
+  }, [authFetch, pushToast]);
 
-  const isGuestMode =
-    !firebaseUser || (!firebaseUser.emailVerified && !isRootAdminEmail(firebaseUser.email)) || !profile;
-  const resolvedBuckets = isGuestMode
-    ? {
-        ...guestBuckets,
-        totalBalance: guestBuckets.depositBalance + guestBuckets.winningBalance + guestBuckets.bonusBalance,
-      }
-    : extractWalletBuckets(profile);
+  const hasVerifiedFirebase =
+    Boolean(firebaseUser) &&
+    (Boolean(firebaseUser?.emailVerified) || isRootAdminEmail(firebaseUser?.email)) &&
+    Boolean(firestoreProfile);
+
+  const isAuthenticated = hasVerifiedFirebase || Boolean(sessionUser);
+  const authReady = firebaseAuthReady && sessionAuthReady;
+  const isGuestMode = !hasVerifiedFirebase;
+
+  const profile = hasVerifiedFirebase ? firestoreProfile : sessionUser?.profile ?? null;
+  const privateUser = hasVerifiedFirebase ? firestorePrivateUser : sessionUser?.privateUser ?? null;
+
+  const resolvedBuckets = profile
+    ? extractWalletBuckets(profile)
+    : {
+        depositBalance: 0,
+        winningBalance: 0,
+        bonusBalance: 0,
+        totalBalance: 0,
+      };
 
   const balance = resolvedBuckets.totalBalance;
   const depositBalance = resolvedBuckets.depositBalance;
   const winningBalance = resolvedBuckets.winningBalance;
   const bonusBalance = resolvedBuckets.bonusBalance;
 
+  const updateAccountProfile = useCallback(
+    async (opts: { username: string; avatarSeed: string }) => {
+      if (hasVerifiedFirebase && firebaseUser) {
+        await updateUserProfileAndSettings(firebaseUser.uid, opts);
+        return;
+      }
+      if (sessionUser) {
+        const resp = await authFetch('/api/account/profile', opts);
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          user?: SessionAccountData;
+        };
+        if (!resp.ok || !data.ok || !data.user) {
+          throw new Error(data.error || 'Unable to save profile');
+        }
+        setSessionUser(data.user);
+        return;
+      }
+      throw new Error('Authentication required');
+    },
+    [authFetch, firebaseUser, hasVerifiedFirebase, sessionUser],
+  );
+
+  const claimDailyCheckIn = useCallback(async () => {
+    if (hasVerifiedFirebase && firebaseUser) {
+      return claimDailyLoginReward(firebaseUser.uid);
+    }
+    if (sessionUser) {
+      const resp = await authFetch('/api/account/daily-claim', {});
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        reward?: number;
+        streakDays?: number;
+        nextBalance?: number;
+        user?: SessionAccountData;
+      };
+      if (!resp.ok || !data.ok || !data.user) {
+        throw new Error(data.error || 'Unable to claim daily reward');
+      }
+      setSessionUser(data.user);
+      return {
+        reward: data.reward || 0,
+        streakDays: data.streakDays || 1,
+        nextBalance: data.nextBalance || 0,
+      };
+    }
+    throw new Error('Please sign in to claim daily rewards.');
+  }, [authFetch, firebaseUser, hasVerifiedFirebase, sessionUser]);
+
   const placeBet = useCallback(
     async (game: GameId, amount: number, roundId: string, description: string): Promise<number> => {
       const wager = Math.floor(amount);
       if (wager <= 0) throw new Error('Wager must be greater than zero');
-      if (isGuestMode) {
-        const split = calculateBetSplit(guestBuckets, wager);
-        if (!split.ok) {
-          throw new Error(split.reason || 'Insufficient virtual coin balance');
-        }
-        const nextBuckets = {
-          depositBalance: guestBuckets.depositBalance - split.fromDeposit,
-          winningBalance: guestBuckets.winningBalance - split.fromWinning,
-          bonusBalance: guestBuckets.bonusBalance - split.fromBonus,
-        };
-        setGuestBuckets(nextBuckets);
-        return nextBuckets.depositBalance + nextBuckets.winningBalance + nextBuckets.bonusBalance;
+      if (hasVerifiedFirebase && firebaseUser) {
+        return placeAtomicBet({
+          uid: firebaseUser.uid,
+          game,
+          amount: wager,
+          roundId,
+          description,
+        });
       }
-      return placeAtomicBet({
-        uid: firebaseUser.uid,
-        game,
-        amount: wager,
-        roundId,
-        description,
-      });
+      if (sessionUser) {
+        const resp = await authFetch('/api/account/bet', { amount: wager, game, roundId });
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          nextBalance?: number;
+          user?: SessionAccountData;
+        };
+        if (!resp.ok || !data.ok || !data.user) {
+          throw new Error(data.error || 'Insufficient balance. Please deposit coins in Wallet.');
+        }
+        setSessionUser(data.user);
+        return data.nextBalance ?? data.user.profile.balance;
+      }
+      throw new Error('Please log in to place bets.');
     },
-    [firebaseUser, guestBuckets, isGuestMode],
+    [authFetch, firebaseUser, hasVerifiedFirebase, sessionUser],
   );
 
   const settleRound = useCallback(
@@ -519,34 +712,41 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       roundId: string;
       seedHash: string;
     }): Promise<number> => {
-      if (isGuestMode) {
-        const payout = Math.max(0, Math.round(params.payout));
-        const isTieRefund = params.outcome === 'tie' && payout === Math.round(params.betAmount);
-        let nextTotal = 0;
-        setGuestBuckets((prev) => {
-          const updated = {
-            depositBalance: prev.depositBalance + (isTieRefund ? payout : 0),
-            winningBalance: prev.winningBalance + (isTieRefund ? 0 : payout),
-            bonusBalance: prev.bonusBalance,
-          };
-          nextTotal = updated.depositBalance + updated.winningBalance + updated.bonusBalance;
-          return updated;
+      if (hasVerifiedFirebase && firebaseUser && firestoreProfile) {
+        return settleAtomicGameRound({
+          uid: firebaseUser.uid,
+          username: firestoreProfile.username,
+          ...params,
         });
-        return nextTotal || balance + payout;
       }
-      return settleAtomicGameRound({
-        uid: firebaseUser.uid,
-        username: profile.username,
-        ...params,
-      });
+      if (sessionUser) {
+        const resp = await authFetch('/api/account/settle', {
+          betAmount: params.betAmount,
+          payout: params.payout,
+          outcome: params.outcome,
+        });
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          nextBalance?: number;
+          user?: SessionAccountData;
+        };
+        if (resp.ok && data.ok && data.user) {
+          setSessionUser(data.user);
+          return data.nextBalance ?? data.user.profile.balance;
+        }
+        return balance;
+      }
+      return balance;
     },
-    [balance, firebaseUser, isGuestMode, profile],
+    [authFetch, balance, firebaseUser, firestoreProfile, hasVerifiedFirebase, sessionUser],
   );
 
   return (
     <AppContext.Provider
       value={{
         firebaseUser,
+        sessionUser,
+        isAuthenticated,
         authReady,
         isAdmin,
         profile,
@@ -569,6 +769,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         signInWithGoogle,
         signInWithEmail,
         registerWithEmail,
+        loginWithCredentials,
+        registerWithCredentials,
+        updateAccountProfile,
+        claimDailyCheckIn,
         sendResetPassword,
         logout,
         placeBet,

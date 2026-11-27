@@ -149,20 +149,85 @@ class SoundEngine {
     this.playTone(680, 420, 0.055, 'triangle', 0.12);
   }
 
-  public playChipPlace() {
-    // Short (45ms), soft, dampened ceramic casino chip tap/clink
-    this.playTone(1850, 1350, 0.045, 'sine', 0.16);
-    this.playNoise(0.04, 3800, 0.12, 0.002);
+  private lastChipSoundTime = 0;
+
+  private playCoinClink(level = 1) {
+    if (!this.soundEnabled || this.volume <= 0) return;
+
+    const perfNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if (perfNow - this.lastChipSoundTime < 90) return; // 90ms anti-distortion throttle
+    this.lastChipSoundTime = perfNow;
+
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const jitter = 0.97 + Math.random() * 0.06;
+
+    // Master gain strictly capped <= 0.22 for clean, natural coin clink without clipping
+    const master = ctx.createGain();
+    const targetGain = Math.min(0.22, 0.21 * level * this.volume);
+    master.gain.setValueAtTime(targetGain, now);
+    master.connect(ctx.destination);
+
+    // 1. Primary metallic/ceramic coin resonance (~2200Hz, crisp 55ms exponential decay)
+    const osc1 = ctx.createOscillator();
+    const g1 = ctx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(2200 * jitter, now);
+    g1.gain.setValueAtTime(0.0001, now);
+    g1.gain.linearRampToValueAtTime(0.62, now + 0.002);
+    g1.gain.exponentialRampToValueAtTime(0.0001, now + 0.057);
+    osc1.connect(g1);
+    g1.connect(master);
+    osc1.start(now);
+    osc1.stop(now + 0.062);
+
+    // 2. High-frequency harmonic shimmer (~4400Hz, crisp 55ms exponential decay)
+    const osc2 = ctx.createOscillator();
+    const g2 = ctx.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(4400 * jitter, now);
+    g2.gain.setValueAtTime(0.0001, now);
+    g2.gain.linearRampToValueAtTime(0.36, now + 0.002);
+    g2.gain.exponentialRampToValueAtTime(0.0001, now + 0.055);
+    osc2.connect(g2);
+    g2.connect(master);
+    osc2.start(now);
+    osc2.stop(now + 0.06);
+
+    // 3. Subtle 15ms impact transient (bandpass-filtered tap on felt/chip stack)
+    const transientDuration = 0.015;
+    const sampleCount = Math.max(1, Math.floor(ctx.sampleRate * transientDuration));
+    const buffer = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sampleCount * 0.32));
+    }
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = buffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(3200 * jitter, now);
+    filter.Q.setValueAtTime(1.6, now);
+
+    const gNoise = ctx.createGain();
+    gNoise.gain.setValueAtTime(0.28, now);
+    gNoise.gain.exponentialRampToValueAtTime(0.0001, now + transientDuration);
+
+    noiseSrc.connect(filter);
+    filter.connect(gNoise);
+    gNoise.connect(master);
+    noiseSrc.start(now);
   }
 
-  private lastBotChipSoundTime = 0;
-  public playSoftTableChip() {
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    if (now - this.lastBotChipSoundTime < 120) return; // Throttle rapid bot chip sounds (>= 120ms cooldown)
-    this.lastBotChipSoundTime = now;
+  public playChipPlace() {
+    this.playCoinClink(1.0);
+  }
 
-    this.playTone(1650, 1200, 0.04, 'sine', 0.08);
-    this.playNoise(0.03, 3400, 0.07, 0.002);
+  public playSoftTableChip() {
+    this.playCoinClink(0.75);
   }
 
   public playCountdownTick(urgent = false) {

@@ -316,7 +316,7 @@ export function computeVipProgress(
   return { tier, wagered, progressPct, remainingToNext };
 }
 
-export const DAILY_STREAK_REWARDS = [500, 750, 1000, 1500, 2000, 3000, 5000];
+export const DAILY_STREAK_REWARDS = [5, 10, 15, 20, 30, 40, 50];
 
 export const DAILY_MISSIONS: DailyMissionDef[] = [
   {
@@ -405,7 +405,6 @@ export async function ensureUserProvisioned(params: {
 }): Promise<{ profile: PublicProfile; privateUser: UserPrivate; welcomeBonusGranted: number }> {
   const pubRef = doc(db, 'publicProfiles', params.uid);
   const privRef = doc(db, 'users', params.uid);
-  const platformSettingsRef = doc(db, 'settings', 'platform');
   const defaultCode = generateReferralCodeFromUid(params.uid);
 
   const isRootAdmin = (params.email || '').trim().toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
@@ -456,19 +455,8 @@ export async function ensureUserProvisioned(params: {
       };
     }
 
-    // Read admin-configured welcomeBonusAmount from Firestore settings/platform (default ₹51)
-    let welcomeBonus = DEFAULT_WELCOME_BONUS;
-    try {
-      const settingsSnap = await getDoc(platformSettingsRef);
-      if (settingsSnap.exists()) {
-        const rawBonus = Number(settingsSnap.data()?.welcomeBonusAmount);
-        if (Number.isFinite(rawBonus) && rawBonus >= 0 && rawBonus <= 500) {
-          welcomeBonus = Math.round(rawBonus);
-        }
-      }
-    } catch {
-      welcomeBonus = DEFAULT_WELCOME_BONUS;
-    }
+    // Initialize new users with 0 deposited balance and 0 free starting coins to prevent bonus abuse
+    const welcomeBonus = 0;
 
     const username = sanitizeUsername(params.displayName || params.email.split('@')[0] || 'Player');
     const avatarSeed = username.slice(0, 16);
@@ -891,6 +879,19 @@ export async function claimDailySpinReward(
   const privRef = doc(db, 'users', uid);
   const today = getTodayUtcDateKey();
 
+  let hasApprovedDepositRecord = false;
+  try {
+    const upiSnap = await getDocs(
+      query(collection(db, 'upiRequests'), where('userId', '==', uid), limit(50)),
+    );
+    hasApprovedDepositRecord = upiSnap.docs.some((d) => {
+      const rec = d.data() as UpiRequestRecord;
+      return rec.type === 'deposit' && (rec.status === 'approved' || (rec.status as string) === 'completed');
+    });
+  } catch {
+    hasApprovedDepositRecord = false;
+  }
+
   try {
     return await runTransaction(db, async (tx) => {
       const [pubSnap, privSnap] = await Promise.all([tx.get(pubRef), tx.get(privRef)]);
@@ -898,12 +899,17 @@ export async function claimDailySpinReward(
       const pub = pubSnap.data() as PublicProfile;
       const priv = privSnap.data() as UserPrivate;
 
+      const hasDeposited = Math.max(0, Math.round(pub.totalDeposited || 0)) > 0 || hasApprovedDepositRecord;
+      if (!hasDeposited) {
+        throw new Error('Deposit Required to Spin. Please make a deposit first.');
+      }
+
       if (priv.lastSpinDate === today) {
         throw new Error('Daily Spin Wheel already used today. Come back tomorrow!');
       }
 
       const buckets = extractWalletBuckets(pub);
-      const reward = Math.max(0, Math.min(5000, Math.round(spinResult.reward)));
+      const reward = Math.max(0, Math.min(100, Math.round(spinResult.reward)));
       const granted = Math.min(reward, Math.max(0, 100000000 - buckets.totalBalance));
       const nextBonus = buckets.bonusBalance + granted;
       const nextBalance = buckets.depositBalance + buckets.winningBalance + nextBonus;
@@ -939,7 +945,12 @@ export async function claimDailySpinReward(
       return { reward: granted, nextBalance };
     });
   } catch (error) {
-    if (error instanceof Error && error.message.includes('already used')) throw error;
+    if (
+      error instanceof Error &&
+      (error.message.includes('already used') || error.message.includes('Deposit Required'))
+    ) {
+      throw error;
+    }
     handleFirestoreError(error, OperationType.WRITE, `users/${uid}`);
   }
 }

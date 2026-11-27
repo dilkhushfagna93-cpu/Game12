@@ -6,6 +6,7 @@ import {
   Gift,
   Headphones,
   Home,
+  LogOut,
   Menu,
   Send,
   Shield,
@@ -30,7 +31,7 @@ const PRIMARY_NAV = [
 ];
 
 export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { firebaseUser, profile, balance, isAdmin, gameConfigs, toasts, dismissToast } = useApp();
+  const { firebaseUser, isAuthenticated, profile, balance, isAdmin, gameConfigs, logout, toasts, dismissToast } = useApp();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const location = useLocation();
   const telegramUrl = resolveActiveTelegramUrl(gameConfigs.platform.telegramSupportUrl);
@@ -129,15 +130,30 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
               </Link>
             )}
 
-            {firebaseUser ? (
-              <Link
-                to="/profile"
-                onClick={() => soundEngine.playClick()}
-                className="hidden md:inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs font-medium text-zinc-100 transition-colors whitespace-nowrap shrink-0 max-w-[150px]"
-              >
-                <User className="w-3.5 h-3.5 text-[#d4af37] shrink-0" aria-hidden="true" />
-                <span className="truncate">{profile?.username || firebaseUser.displayName || 'Account'}</span>
-              </Link>
+            {isAuthenticated ? (
+              <div className="hidden md:flex items-center gap-2 shrink-0">
+                <Link
+                  to="/profile"
+                  onClick={() => soundEngine.playClick()}
+                  className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs font-medium text-zinc-100 transition-colors whitespace-nowrap shrink-0 max-w-[140px]"
+                >
+                  <User className="w-3.5 h-3.5 text-[#d4af37] shrink-0" aria-hidden="true" />
+                  <span className="truncate">{profile?.username || firebaseUser?.displayName || 'Account'}</span>
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundEngine.playClick();
+                    void logout();
+                  }}
+                  aria-label="Logout"
+                  title="Logout"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-rose-500/35 bg-rose-950/35 hover:bg-rose-900/50 text-xs font-semibold text-rose-200 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Logout</span>
+                </button>
+              </div>
             ) : (
               <div className="hidden md:flex items-center gap-2 shrink-0">
                 <Link
@@ -229,14 +245,28 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
               </a>
             </div>
             <div className="pt-2 border-t border-white/10 flex items-center gap-2">
-              {firebaseUser ? (
-                <Link
-                  to="/profile"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="flex-1 text-center py-2.5 rounded-lg gold-button text-sm font-semibold"
-                >
-                  Profile ({profile?.username || 'Player'})
-                </Link>
+              {isAuthenticated ? (
+                <>
+                  <Link
+                    to="/profile"
+                    onClick={() => setMobileMenuOpen(false)}
+                    className="flex-1 text-center py-2.5 rounded-lg gold-button text-sm font-semibold truncate px-3"
+                  >
+                    Profile ({profile?.username || 'Player'})
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundEngine.playClick();
+                      setMobileMenuOpen(false);
+                      void logout();
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg border border-rose-500/40 bg-rose-950/45 hover:bg-rose-900/55 text-sm font-semibold text-rose-200 shrink-0"
+                  >
+                    <LogOut className="w-4 h-4" aria-hidden="true" />
+                    <span>Logout</span>
+                  </button>
+                </>
               ) : (
                 <>
                   <Link

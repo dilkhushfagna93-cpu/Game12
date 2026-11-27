@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Award, Check, Copy, Flame, Gift, Lock, MessageCircle, Share2, Sparkles, Users } from 'lucide-react';
 import { VipTierCard } from '../components/VipTierCard';
 import { useApp } from '../context/AppContext';
@@ -7,7 +7,6 @@ import { soundEngine } from '../services/soundEngine';
 import {
   applyReferralCode,
   BADGE_CATALOG,
-  claimDailyLoginReward,
   claimDailySpinReward,
   claimMissionReward,
   claimUnlockedReferralReward,
@@ -15,6 +14,7 @@ import {
   DAILY_STREAK_REWARDS,
   fetchGameHistory,
   fetchUserReferrals,
+  fetchUserUpiRequests,
   generateReferralCodeFromUid,
   getTodayUtcDateKey,
   REFERRAL_REWARD_COINS,
@@ -22,18 +22,19 @@ import {
 import type { DailyMissionDef, ReferralRecord } from '../types';
 
 const WHEEL_SEGMENTS = [
-  { label: '250', reward: 250, fill: '#1f1633', text: '#f6dc93' },
-  { label: '500', reward: 500, fill: '#2c1e4a', text: '#ffffff' },
-  { label: '750', reward: 750, fill: '#191329', text: '#f6dc93' },
-  { label: '1,000', reward: 1000, fill: '#37235d', text: '#ffffff' },
-  { label: '1.5K', reward: 1500, fill: '#1f1633', text: '#f6dc93' },
-  { label: '2.5K', reward: 2500, fill: '#452b73', text: '#ffffff' },
-  { label: '4K', reward: 4000, fill: '#191329', text: '#f6dc93' },
-  { label: '5K', reward: 5000, fill: '#9f7b1f', text: '#09070d' },
+  { label: '5', reward: 5, fill: '#1f1633', text: '#f6dc93' },
+  { label: '10', reward: 10, fill: '#2c1e4a', text: '#ffffff' },
+  { label: '15', reward: 15, fill: '#191329', text: '#f6dc93' },
+  { label: '20', reward: 20, fill: '#37235d', text: '#ffffff' },
+  { label: '30', reward: 30, fill: '#1f1633', text: '#f6dc93' },
+  { label: '50', reward: 50, fill: '#452b73', text: '#ffffff' },
+  { label: '75', reward: 75, fill: '#191329', text: '#f6dc93' },
+  { label: '100', reward: 100, fill: '#9f7b1f', text: '#09070d' },
 ];
 
 export default function RewardsPage() {
-  const { firebaseUser, profile, privateUser, isGuestMode, pushToast } = useApp();
+  const navigate = useNavigate();
+  const { firebaseUser, isAuthenticated, profile, privateUser, isGuestMode, claimDailyCheckIn, pushToast } = useApp();
   const [claimingDaily, setClaimingDaily] = useState(false);
   const [claimingMissionId, setClaimingMissionId] = useState<string | null>(null);
   const [gameCounts, setGameCounts] = useState({ ludo: 0, dt: 0, aviator: 0 });
@@ -42,6 +43,7 @@ export default function RewardsPage() {
   const [spinning, setSpinning] = useState(false);
   const [wheelRotation, setWheelRotation] = useState(0);
   const [spinPrizeMsg, setSpinPrizeMsg] = useState('');
+  const [hasApprovedDepositRecord, setHasApprovedDepositRecord] = useState(false);
 
   // Referral System State
   const [referrals, setReferrals] = useState<ReferralRecord[]>([]);
@@ -56,7 +58,10 @@ export default function RewardsPage() {
   }, [firebaseUser, isGuestMode]);
 
   useEffect(() => {
-    if (!firebaseUser || isGuestMode) return;
+    if (!firebaseUser || isGuestMode) {
+      setHasApprovedDepositRecord(false);
+      return;
+    }
     void fetchGameHistory(firebaseUser.uid, 50)
       .then((list) => {
         setGameCounts({
@@ -66,12 +71,24 @@ export default function RewardsPage() {
         });
       })
       .catch(() => {});
+    void fetchUserUpiRequests(firebaseUser.uid)
+      .then((reqs) => {
+        const hasApproved = reqs.some(
+          (r) => r.type === 'deposit' && (r.status === 'approved' || (r.status as string) === 'completed'),
+        );
+        setHasApprovedDepositRecord(hasApproved);
+      })
+      .catch(() => {
+        setHasApprovedDepositRecord(false);
+      });
     void loadReferrals();
-  }, [firebaseUser, isGuestMode, loadReferrals, profile?.gamesPlayed]);
+  }, [firebaseUser, isGuestMode, loadReferrals, profile?.gamesPlayed, profile?.totalDeposited]);
 
   const todayKey = getTodayUtcDateKey();
   const claimedToday = privateUser?.lastDailyClaimDate === todayKey;
   const spunToday = privateUser?.lastSpinDate === todayKey;
+  const totalDeposited = Math.max(0, Math.round(profile?.totalDeposited || 0));
+  const hasDeposited = !isGuestMode && !!firebaseUser && (totalDeposited > 0 || hasApprovedDepositRecord);
   const currentStreak = privateUser?.streakDays || 0;
   const myReferralCode =
     privateUser?.referralCode || (firebaseUser ? generateReferralCodeFromUid(firebaseUser.uid) : '');
@@ -92,13 +109,13 @@ export default function RewardsPage() {
     .reduce((sum, r) => sum + (r.rewardAmount || REFERRAL_REWARD_COINS), 0);
 
   const handleClaimDaily = async () => {
-    if (!firebaseUser || isGuestMode) {
-      pushToast('Sign in with Google to claim daily virtual coin streaks.', 'gold');
+    if (!isAuthenticated) {
+      pushToast('Please log in to claim daily check-in rewards.', 'gold');
       return;
     }
     setClaimingDaily(true);
     try {
-      const res = await claimDailyLoginReward(firebaseUser.uid);
+      const res = await claimDailyCheckIn();
       soundEngine.playCoinReward();
       pushToast(`Day ${res.streakDays} claimed! +${res.reward.toLocaleString()} Bonus Coins.`, 'emerald');
     } catch (err) {
@@ -111,6 +128,10 @@ export default function RewardsPage() {
   const handleSpinWheel = async () => {
     if (!firebaseUser || isGuestMode) {
       pushToast('Sign in with Google to spin the Daily Bonus Wheel.', 'gold');
+      return;
+    }
+    if (!hasDeposited) {
+      pushToast('Deposit Required to Spin. Add funds in your Wallet to unlock.', 'gold');
       return;
     }
     if (spunToday || spinning) return;
@@ -254,7 +275,7 @@ export default function RewardsPage() {
           </div>
           <button
             type="button"
-            disabled={isGuestMode || claimedToday || claimingDaily}
+            disabled={!isAuthenticated || claimedToday || claimingDaily}
             onClick={() => void handleClaimDaily()}
             className="gold-button px-6 py-2.5 rounded-xl text-sm font-bold disabled:opacity-45"
           >
@@ -303,14 +324,20 @@ export default function RewardsPage() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Daily Spin Wheel */}
         <section className="lg:col-span-6 surface-panel rounded-2xl p-6 sm:p-7 flex flex-col items-center justify-between space-y-5">
-          <div className="text-center space-y-1">
+          <div className="text-center space-y-1.5">
             <h2 className="font-display text-xl font-bold text-[#faf6ee] inline-flex items-center gap-2">
               <Sparkles className="w-5 h-5 text-[#d4af37]" />
               <span>Daily Bonus Spin Wheel</span>
             </h2>
             <p className="text-xs text-zinc-400">
-              1 free server-verified spin every day · Win up to 5,000 Bonus Coins!
+              Win up to 100 Bonus Coins! (Deposited Players Only)
             </p>
+            {!hasDeposited && (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-amber-400/50 bg-amber-500/15 text-amber-200 text-[11px] font-semibold">
+                <Lock className="w-3 h-3 text-amber-300" />
+                <span>Deposit Required to Spin</span>
+              </div>
+            )}
           </div>
 
           <div className="relative w-60 h-60 sm:w-64 sm:h-64 flex items-center justify-center">
@@ -320,7 +347,9 @@ export default function RewardsPage() {
               aria-hidden="true"
             />
             <div
-              className="w-full h-full rounded-full border-4 border-[#d4af37] shadow-[0_0_32px_rgba(212,175,55,0.28)] overflow-hidden"
+              className={`w-full h-full rounded-full border-4 border-[#d4af37] shadow-[0_0_32px_rgba(212,175,55,0.28)] overflow-hidden transition-opacity ${
+                !hasDeposited ? 'opacity-80' : ''
+              }`}
               style={{
                 transform: `rotate(${wheelRotation}deg)`,
                 transition: spinning ? 'transform 4.2s cubic-bezier(0.16, 1, 0.22, 1)' : 'none',
@@ -369,20 +398,44 @@ export default function RewardsPage() {
                 <circle cx="100" cy="100" r="6" fill="#d4af37" />
               </svg>
             </div>
+            {!hasDeposited && (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 rounded-full bg-black/25 flex items-center justify-center"
+              >
+                <div className="w-11 h-11 rounded-full bg-[#120d1d]/95 border-2 border-[#d4af37] shadow-[0_0_16px_rgba(0,0,0,0.85)] flex items-center justify-center">
+                  <Lock className="w-5 h-5 text-[#f6dc93]" />
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="w-full text-center space-y-2">
             {spinPrizeMsg && (
               <div className="text-sm font-bold text-emerald-300">{spinPrizeMsg}</div>
             )}
-            <button
-              type="button"
-              disabled={isGuestMode || spunToday || spinning}
-              onClick={() => void handleSpinWheel()}
-              className="w-full max-w-xs gold-button py-3 rounded-xl text-sm font-bold disabled:opacity-45"
-            >
-              {spinning ? 'Spinning...' : spunToday ? 'Come Back Tomorrow' : 'Spin Bonus Wheel'}
-            </button>
+            {!hasDeposited ? (
+              <button
+                type="button"
+                onClick={() => {
+                  soundEngine.playClick();
+                  navigate('/wallet');
+                }}
+                className="w-full max-w-xs inline-flex items-center justify-center gap-2 py-3 px-4 rounded-xl border border-[#d4af37]/75 bg-gradient-to-r from-[#2c1d07] via-[#4a310a] to-[#2c1d07] hover:brightness-110 text-[#fde68a] text-sm font-bold shadow-[0_0_20px_rgba(212,175,55,0.2)] transition-all"
+              >
+                <Lock className="w-4 h-4 text-[#f6dc93]" />
+                <span>Deposit to Unlock Spin</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={isGuestMode || spunToday || spinning}
+                onClick={() => void handleSpinWheel()}
+                className="w-full max-w-xs gold-button py-3 rounded-xl text-sm font-bold disabled:opacity-45"
+              >
+                {spinning ? 'Spinning...' : spunToday ? 'Come Back Tomorrow' : 'Spin Bonus Wheel'}
+              </button>
+            )}
           </div>
         </section>
 
