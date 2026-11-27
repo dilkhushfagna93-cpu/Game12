@@ -1,0 +1,422 @@
+{
+  "entities": {
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Publicly visible player profile, split balance buckets, VIP wager volume, and leaderboard statistics with zero PII.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "avatarSeed": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "balance": { "type": "number" },
+        "depositBalance": { "type": "number" },
+        "winningBalance": { "type": "number" },
+        "bonusBalance": { "type": "number" },
+        "totalDeposited": { "type": "number" },
+        "totalWagered": { "type": "number" },
+        "gamesPlayed": { "type": "number" },
+        "wins": { "type": "number" },
+        "totalWon": { "type": "number" },
+        "winRate": { "type": "number" },
+        "weeklyScore": { "type": "number" },
+        "monthlyScore": { "type": "number" },
+        "streakDays": { "type": "number" },
+        "badges": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "avatarSeed", "balance", "gamesPlayed", "wins", "totalWon", "winRate", "weeklyScore", "monthlyScore", "streakDays", "badges", "status", "createdAt", "updatedAt"]
+    },
+    "UserPrivate": {
+      "title": "UserPrivate",
+      "description": "Private user account metadata, referrals, spin/daily streaks, and withdrawal cooldown counters isolated from public reads.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "displayName": { "type": "string", "maxLength": 64 },
+        "username": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "role": { "type": "string", "enum": ["admin", "player"] },
+        "welcomeBonusClaimed": { "type": "boolean" },
+        "lastDailyClaimDate": { "type": "string", "maxLength": 16 },
+        "lastSpinDate": { "type": "string", "maxLength": 16 },
+        "streakDays": { "type": "number" },
+        "claimedMissions": { "type": "array" },
+        "referralCode": { "type": "string", "maxLength": 24 },
+        "referredBy": { "type": "string", "maxLength": 128 },
+        "referralRewardUnlocked": { "type": "boolean" },
+        "lastWithdrawalAtMs": { "type": "number" },
+        "dailyWithdrawnDate": { "type": "string", "maxLength": 16 },
+        "dailyWithdrawnTotal": { "type": "number" },
+        "graphicsQuality": { "type": "string", "enum": ["low", "medium", "ultra"] },
+        "soundEnabled": { "type": "boolean" },
+        "musicEnabled": { "type": "boolean" },
+        "volume": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "username", "lastDailyClaimDate", "streakDays", "claimedMissions", "graphicsQuality", "soundEnabled", "musicEnabled", "volume", "createdAt", "updatedAt"]
+    },
+    "WalletTransaction": {
+      "title": "WalletTransaction",
+      "description": "Immutable atomic wallet ledger record with balance bucket tagging.",
+      "type": "object",
+      "properties": {
+        "txId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["signup_bonus", "daily_reward", "spin_reward", "referral_reward", "promo_bonus", "mission_reward", "free_refill", "upi_deposit", "withdrawal_request", "withdrawal_refund", "bet", "win", "refund", "admin_adjust"] },
+        "game": { "type": "string", "enum": ["dragon_tiger", "ludo", "aviator", "teen_patti", "system"] },
+        "bucket": { "type": "string", "enum": ["deposit", "winning", "bonus", "mixed"] },
+        "amount": { "type": "number" },
+        "balanceBefore": { "type": "number" },
+        "balanceAfter": { "type": "number" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "roundId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["txId", "userId", "type", "game", "amount", "balanceBefore", "balanceAfter", "description", "roundId", "createdAt"]
+    },
+    "UpiRequest": {
+      "title": "UpiRequest",
+      "description": "Direct UPI deposit and withdrawal request subject to unique UTR and admin settlement.",
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "type": { "type": "string", "enum": ["deposit", "withdrawal"] },
+        "amount": { "type": "number" },
+        "upiId": { "type": "string", "minLength": 0, "maxLength": 100 },
+        "utr": { "type": "string", "maxLength": 32 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "payoutRef": { "type": "string", "maxLength": 64 },
+        "adminNote": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["requestId", "userId", "username", "type", "amount", "upiId", "utr", "status", "payoutRef", "adminNote", "createdAt", "updatedAt"]
+    },
+    "UpiUtrLock": {
+      "title": "UpiUtrLock",
+      "description": "Immutable uniqueness index keyed by 12-digit UTR number to prevent duplicate deposit claims.",
+      "type": "object",
+      "properties": {
+        "utr": { "type": "string", "minLength": 12, "maxLength": 12, "pattern": "^[0-9]{12}$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["utr", "userId", "requestId", "createdAt"]
+    },
+    "PromoCode": {
+      "title": "PromoCode",
+      "description": "Admin-managed promotional bonus code redeemable on deposits.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 3, "maxLength": 24, "pattern": "^[A-Z0-9]+$" },
+        "bonusAmount": { "type": "number" },
+        "minDeposit": { "type": "number" },
+        "maxUses": { "type": "number" },
+        "usedCount": { "type": "number" },
+        "active": { "type": "boolean" },
+        "description": { "type": "string", "maxLength": 160 },
+        "expiresAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "bonusAmount", "minDeposit", "maxUses", "usedCount", "active", "description", "expiresAt", "createdAt", "updatedAt"]
+    },
+    "PromoRedemption": {
+      "title": "PromoRedemption",
+      "description": "Immutable per-user promo redemption lock preventing duplicate promo claims.",
+      "type": "object",
+      "properties": {
+        "redemptionId": { "type": "string", "minLength": 5, "maxLength": 160, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 3, "maxLength": 24, "pattern": "^[A-Z0-9]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bonusAmount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["redemptionId", "code", "userId", "bonusAmount", "createdAt"]
+    },
+    "AdminAuditLog": {
+      "title": "AdminAuditLog",
+      "description": "Immutable administrative audit log for manual balance adjustments, account freezes, and configuration changes.",
+      "type": "object",
+      "properties": {
+        "logId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "adminUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "adminEmail": { "type": "string", "maxLength": 160 },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "targetUsername": { "type": "string", "maxLength": 64 },
+        "action": { "type": "string", "enum": ["balance_adjust", "status_change", "config_update", "promo_update", "upi_review", "ticket_reply"] },
+        "amount": { "type": "number" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["logId", "adminUid", "adminEmail", "targetUid", "targetUsername", "action", "amount", "reason", "createdAt"]
+    },
+    "ReferralRecord": {
+      "title": "ReferralRecord",
+      "description": "Referral link record whose bonus unlocks only after the referred player finishes their first game.",
+      "type": "object",
+      "properties": {
+        "referralId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referrerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referredUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "referredUsername": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "code": { "type": "string", "minLength": 4, "maxLength": 24, "pattern": "^[A-Z0-9]+$" },
+        "rewardAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "unlocked", "claimed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["referralId", "referrerUid", "referredUid", "referredUsername", "code", "rewardAmount", "status", "createdAt", "updatedAt"]
+    },
+    "ReferralCodeMap": {
+      "title": "ReferralCodeMap",
+      "description": "Public lookup mapping a referral code to the referrer UID without exposing PII.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "minLength": 4, "maxLength": 24, "pattern": "^[A-Z0-9]+$" },
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "uid", "username", "createdAt"]
+    },
+    "GameHistory": {
+      "title": "GameHistory",
+      "description": "Immutable completed game round record.",
+      "type": "object",
+      "properties": {
+        "historyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "game": { "type": "string", "enum": ["dragon_tiger", "ludo", "aviator", "teen_patti"] },
+        "betAmount": { "type": "number" },
+        "payout": { "type": "number" },
+        "netProfit": { "type": "number" },
+        "outcome": { "type": "string", "enum": ["win", "loss", "tie", "cashout", "crashed"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "seedHash": { "type": "string", "maxLength": 128 },
+        "isPublic": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["historyId", "userId", "username", "game", "betAmount", "payout", "netProfit", "outcome", "summary", "seedHash", "isPublic", "createdAt"]
+    },
+    "LudoRoom": {
+      "title": "LudoRoom",
+      "description": "Real-time multiplayer Ludo room supporting Quick (1-token), Classic, and Private modes with turn timers and reactions.",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 6, "maxLength": 8, "pattern": "^[A-Z0-9]+$" },
+        "hostUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostName": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "maxPlayers": { "type": "number" },
+        "gameMode": { "type": "string", "enum": ["quick", "classic", "private"] },
+        "tokensToWin": { "type": "number" },
+        "status": { "type": "string", "enum": ["waiting", "playing", "finished"] },
+        "entryFee": { "type": "number" },
+        "currentTurnIndex": { "type": "number" },
+        "diceValue": { "type": "number" },
+        "diceRolled": { "type": "boolean" },
+        "consecutiveSixes": { "type": "number" },
+        "winnerUid": { "type": "string", "maxLength": 128 },
+        "winnerName": { "type": "string", "maxLength": 32 },
+        "playerUids": { "type": "array" },
+        "players": { "type": "array" },
+        "tokens": { "type": "object" },
+        "lastMoveNote": { "type": "string", "maxLength": 200 },
+        "turnStartedAtMs": { "type": "number" },
+        "missedTurns": { "type": "object" },
+        "lastReaction": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roomId", "code", "hostUid", "hostName", "maxPlayers", "status", "entryFee", "currentTurnIndex", "diceValue", "diceRolled", "consecutiveSixes", "winnerUid", "winnerName", "playerUids", "players", "tokens", "lastMoveNote", "createdAt", "updatedAt"]
+    },
+    "TeenPattiRoom": {
+      "title": "TeenPattiRoom",
+      "description": "Real-time multiplayer 5-seat Teen Patti (3 Patti) casino table room supporting Boot tables, Blind/Seen Chaal, Side Show, Showdown, and Private 6-digit codes.",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 6, "maxLength": 8, "pattern": "^[A-Z0-9]+$" },
+        "hostUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "hostName": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "maxPlayers": { "type": "number" },
+        "isPrivate": { "type": "boolean" },
+        "bootAmount": { "type": "number" },
+        "chaalLimit": { "type": "number" },
+        "potLimit": { "type": "number" },
+        "status": { "type": "string", "enum": ["waiting", "playing", "showdown", "finished"] },
+        "roundId": { "type": "string", "maxLength": 128 },
+        "handNumber": { "type": "number" },
+        "dealerIndex": { "type": "number" },
+        "currentTurnIndex": { "type": "number" },
+        "currentStake": { "type": "number" },
+        "pot": { "type": "number" },
+        "winnerUid": { "type": "string", "maxLength": 128 },
+        "winnerName": { "type": "string", "maxLength": 32 },
+        "winnerHandLabel": { "type": "string", "maxLength": 64 },
+        "winnerPayout": { "type": "number" },
+        "serverSeedHash": { "type": "string", "maxLength": 128 },
+        "serverSeed": { "type": "string", "maxLength": 128 },
+        "playerUids": { "type": "array" },
+        "players": { "type": "array" },
+        "sideShowRequest": { "type": "object" },
+        "lastReaction": { "type": "object" },
+        "lastActionNote": { "type": "string", "maxLength": 220 },
+        "turnStartedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roomId", "code", "hostUid", "hostName", "maxPlayers", "isPrivate", "bootAmount", "chaalLimit", "potLimit", "status", "roundId", "handNumber", "dealerIndex", "currentTurnIndex", "currentStake", "pot", "winnerUid", "winnerName", "winnerHandLabel", "winnerPayout", "serverSeedHash", "serverSeed", "playerUids", "players", "lastActionNote", "turnStartedAtMs", "createdAt", "updatedAt"]
+    },
+    "GameConfig": {
+      "title": "GameConfig",
+      "description": "Admin-managed game configuration, maintenance controls, UPI deposit handles, support channels, and APK metadata.",
+      "type": "object",
+      "properties": {
+        "gameId": { "type": "string", "enum": ["dragon_tiger", "ludo", "aviator", "teen_patti", "platform"] },
+        "enabled": { "type": "boolean" },
+        "minBet": { "type": "number" },
+        "maxBet": { "type": "number" },
+        "version": { "type": "string", "maxLength": 32 },
+        "apkDownloadUrl": { "type": "string", "maxLength": 512 },
+        "apkVersion": { "type": "string", "maxLength": 32 },
+        "apkSize": { "type": "string", "maxLength": 32 },
+        "apkUpdatedAt": { "type": "string", "maxLength": 32 },
+        "apkAndroidCompat": { "type": "string", "maxLength": 64 },
+        "maintenanceMessage": { "type": "string", "maxLength": 240 },
+        "depositUpiId": { "type": "string", "maxLength": 100 },
+        "depositUpiName": { "type": "string", "maxLength": 64 },
+        "depositQrUrl": { "type": "string", "maxLength": 512 },
+        "whatsappSupportUrl": { "type": "string", "maxLength": 256 },
+        "telegramSupportUrl": { "type": "string", "maxLength": 256 },
+        "matchmakingDifficulty": { "type": "string", "enum": ["casual", "balanced", "competitive"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["gameId", "enabled", "minBet", "maxBet", "version", "apkDownloadUrl", "apkVersion", "apkSize", "apkUpdatedAt", "apkAndroidCompat", "maintenanceMessage", "updatedAt"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "User support ticket, payment/UTR issue, game issue, cheating report, or bug report with admin replies.",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "category": { "type": "string", "enum": ["payment", "game", "bug", "cheating", "account", "contact", "other"] },
+        "subject": { "type": "string", "minLength": 3, "maxLength": 120 },
+        "message": { "type": "string", "minLength": 5, "maxLength": 1200 },
+        "targetUsername": { "type": "string", "maxLength": 32 },
+        "utrRef": { "type": "string", "maxLength": 24 },
+        "status": { "type": "string", "enum": ["open", "investigating", "resolved"] },
+        "adminNote": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reportId", "userId", "username", "category", "subject", "message", "targetUsername", "status", "adminNote", "createdAt", "updatedAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Trusted RBAC admin document.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "PlatformLiquiditySettings": {
+      "title": "PlatformLiquiditySettings",
+      "description": "Unified 4-tier platform liquidity, risk control, and smart matchmaking configuration stored at settings/platform.",
+      "type": "object",
+      "properties": {
+        "liquidityMode": { "type": "string", "enum": ["easy", "balanced", "pro", "ultra-pro"] },
+        "maxRoundPayoutCap": { "type": "number" },
+        "smartMatchmakingEnabled": { "type": "boolean" },
+        "matchmakingWaitSeconds": { "type": "number" },
+        "welcomeBonusAmount": { "type": "number" },
+        "requireFirstDepositToWithdraw": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["liquidityMode", "maxRoundPayoutCap", "smartMatchmakingEnabled", "matchmakingWaitSeconds", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/publicProfiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Public player leaderboard stats, split balances, VIP wager volume, and non-PII profile information."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPrivate" },
+      "description": "Private user account metadata, email, daily streaks, referral metadata, and withdrawal rate counters."
+    },
+    "/walletTransactions/{txId}": {
+      "schema": { "$ref": "#/entities/WalletTransaction" },
+      "description": "Immutable virtual coin ledger records."
+    },
+    "/upiRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/UpiRequest" },
+      "description": "Direct UPI deposit and withdrawal requests awaiting or settled by admin review."
+    },
+    "/upiUtrs/{utr}": {
+      "schema": { "$ref": "#/entities/UpiUtrLock" },
+      "description": "Unique 12-digit UTR registry enforcing one-time deposit redemption."
+    },
+    "/promoCodes/{code}": {
+      "schema": { "$ref": "#/entities/PromoCode" },
+      "description": "Admin-managed promotional bonus codes for deposit bonuses."
+    },
+    "/promoRedemptions/{redemptionId}": {
+      "schema": { "$ref": "#/entities/PromoRedemption" },
+      "description": "Immutable per-user promo code redemption locks."
+    },
+    "/adminAuditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AdminAuditLog" },
+      "description": "Immutable audit trail of administrative balance adjustments, freezes, and settings changes."
+    },
+    "/referrals/{referralId}": {
+      "schema": { "$ref": "#/entities/ReferralRecord" },
+      "description": "Referral relationships unlocking bonus credits strictly after the referred player completes a real game."
+    },
+    "/referralCodes/{code}": {
+      "schema": { "$ref": "#/entities/ReferralCodeMap" },
+      "description": "Public code-to-UID lookup map for referral onboarding."
+    },
+    "/gameHistory/{historyId}": {
+      "schema": { "$ref": "#/entities/GameHistory" },
+      "description": "Immutable game round history records."
+    },
+    "/ludoRooms/{roomId}": {
+      "schema": { "$ref": "#/entities/LudoRoom" },
+      "description": "Real-time multiplayer Ludo game rooms."
+    },
+    "/teenPattiRooms/{roomId}": {
+      "schema": { "$ref": "#/entities/TeenPattiRoom" },
+      "description": "Real-time multiplayer 5-seat Teen Patti casino tables."
+    },
+    "/gameConfigs/{gameId}": {
+      "schema": { "$ref": "#/entities/GameConfig" },
+      "description": "Admin-controlled game toggles, betting limits, UPI handle, support channels, and APK download configuration."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/Report" },
+      "description": "User-submitted support tickets, payment/UTR issues, bug reports, and fair-play reports."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Admin role assignment records."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/PlatformLiquiditySettings" },
+      "description": "Unified 4-tier platform liquidity, payout cap, and smart matchmaking controls (settings/platform)."
+    }
+  }
+}

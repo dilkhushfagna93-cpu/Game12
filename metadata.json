@@ -1,0 +1,8 @@
+{
+  "name": "Aurelia Arena",
+  "description": "Ultra-realistic 3D multi-game platform featuring Dragon Tiger, Ludo, and Aviator with PBR WebGL environments, virtual coin wallets, real-time multiplayer, and leaderboards.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "Aurelia Arena – 3D Multi-Game Platform",
+  "short_name": "Aurelia3D",
+  "description": "Ultra-realistic 3D Dragon Tiger, Ludo Tabletop, and Aviator Ascent with provably fair server RNG and atomic wallet.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#07060b",
+  "background_color": "#07060b",
+  "categories": ["games", "entertainment"],
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
