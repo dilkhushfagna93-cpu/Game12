@@ -122,6 +122,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'uid', 'email', 'displayName', 'username', 'role', 'welcomeBonusClaimed',
+          'signupBonusClaimed',
           'lastDailyClaimDate', 'lastSpinDate', 'streakDays', 'claimedMissions',
           'referralCode', 'referredBy', 'referralRewardUnlocked', 'lastWithdrawalAtMs',
           'dailyWithdrawnDate', 'dailyWithdrawnTotal', 'graphicsQuality',
@@ -133,6 +134,7 @@ service cloud.firestore {
         && data.username is string && data.username.size() >= 2 && data.username.size() <= 32
         && (!('role' in data) || data.role in ['admin', 'player'])
         && (!('welcomeBonusClaimed' in data) || data.welcomeBonusClaimed is bool)
+        && (!('signupBonusClaimed' in data) || data.signupBonusClaimed is bool)
         && data.lastDailyClaimDate is string && data.lastDailyClaimDate.size() <= 16
         && (!('lastSpinDate' in data) || (data.lastSpinDate is string && data.lastSpinDate.size() <= 16))
         && data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 3650
@@ -275,7 +277,7 @@ service cloud.firestore {
         && data.referrerUid != data.referredUid
         && data.referredUsername is string && data.referredUsername.size() >= 2 && data.referredUsername.size() <= 32
         && isValidRefCode(data.code)
-        && data.rewardAmount is number && data.rewardAmount >= 100 && data.rewardAmount <= 10000
+        && data.rewardAmount is number && data.rewardAmount >= 50 && data.rewardAmount <= 10000
         && data.status in ['pending', 'unlocked', 'claimed']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -466,7 +468,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'liquidityMode', 'maxRoundPayoutCap', 'smartMatchmakingEnabled',
-          'matchmakingWaitSeconds', 'welcomeBonusAmount',
+          'matchmakingWaitSeconds', 'welcomeBonusAmount', 'signupBonus',
           'requireFirstDepositToWithdraw', 'updatedAt'
         ])
         && data.liquidityMode in ['easy', 'balanced', 'pro', 'ultra-pro']
@@ -474,18 +476,35 @@ service cloud.firestore {
         && data.smartMatchmakingEnabled is bool
         && data.matchmakingWaitSeconds is number && data.matchmakingWaitSeconds >= 5 && data.matchmakingWaitSeconds <= 15
         && (!('welcomeBonusAmount' in data) || (data.welcomeBonusAmount is number && data.welcomeBonusAmount >= 0 && data.welcomeBonusAmount <= 500))
+        && (!('signupBonus' in data) || (data.signupBonus is number && data.signupBonus >= 0 && data.signupBonus <= 500))
         && (!('requireFirstDepositToWithdraw' in data) || data.requireFirstDepositToWithdraw is bool)
         && data.updatedAt is timestamp;
+    }
+
+    function isValidSignupBonusClaim(data) {
+      return data.keys().hasAll(['claimId', 'uid', 'claimType', 'amount', 'createdAt'])
+        && data.keys().hasOnly(['claimId', 'uid', 'claimType', 'amount', 'createdAt'])
+        && isValidId(data.claimId)
+        && isValidId(data.uid)
+        && data.claimType in ['uid', 'email', 'phone']
+        && data.amount is number && data.amount >= 0 && data.amount <= 500
+        && data.createdAt is timestamp;
     }
 
     function expectedWelcomeBonus() {
       return (
         exists(/databases/$(database)/documents/settings/platform)
-        && ('welcomeBonusAmount' in get(/databases/$(database)/documents/settings/platform).data)
-        && get(/databases/$(database)/documents/settings/platform).data.welcomeBonusAmount is number
+        && ('signupBonus' in get(/databases/$(database)/documents/settings/platform).data)
+        && get(/databases/$(database)/documents/settings/platform).data.signupBonus is number
       )
-        ? get(/databases/$(database)/documents/settings/platform).data.welcomeBonusAmount
-        : 51;
+        ? get(/databases/$(database)/documents/settings/platform).data.signupBonus
+        : (
+          exists(/databases/$(database)/documents/settings/platform)
+          && ('welcomeBonusAmount' in get(/databases/$(database)/documents/settings/platform).data)
+          && get(/databases/$(database)/documents/settings/platform).data.welcomeBonusAmount is number
+        )
+          ? get(/databases/$(database)/documents/settings/platform).data.welcomeBonusAmount
+          : 51;
     }
 
     function isFirstDepositRequired() {
@@ -521,11 +540,14 @@ service cloud.firestore {
         && isValidPublicProfile(incoming())
         && isOwner(userId)
         && incoming().uid == request.auth.uid
+        && !('isAdmin' in incoming())
         && incoming().depositBalance == 0
         && incoming().winningBalance == 0
+        && incoming().bonusBalance >= 0
+        && incoming().bonusBalance <= 500
         && incoming().bonusBalance == incoming().balance
         && (!('totalDeposited' in incoming()) || incoming().totalDeposited == 0)
-        && incoming().balance == expectedWelcomeBonus()
+        && (incoming().balance == expectedWelcomeBonus() || incoming().balance == 0)
         && incoming().gamesPlayed == 0
         && incoming().wins == 0
         && incoming().totalWon == 0
@@ -542,24 +564,49 @@ service cloud.firestore {
           isAdmin() ||
           (
             isOwner(userId) &&
+            !('isAdmin' in incoming()) &&
             existing().status == 'active' &&
             incoming().status == 'active' &&
             (
-              // Action: Update display username / avatar
+              // Action: Update display username / avatar (no balance changes)
               incoming().diff(existing()).affectedKeys().hasOnly(['username', 'avatarSeed', 'updatedAt']) ||
-              // Action: Gameplay / reward / promo / split-bucket settlement (totalDeposited is strictly admin-only; pre-deposit winnings capped at 200)
+              // Action: Bet placement or withdrawal debit (never increases any balance bucket)
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'balance', 'depositBalance', 'winningBalance', 'bonusBalance',
+                  'totalWagered', 'updatedAt'
+                ]) &&
+                incoming().balance <= existing().balance &&
+                incoming().depositBalance <= existing().depositBalance &&
+                incoming().winningBalance <= existing().winningBalance &&
+                incoming().bonusBalance <= existing().bonusBalance
+              ) ||
+              // Action: Completed game round settlement (gamesPlayed +1; never increases bonusBalance or totalDeposited; pre-deposit winnings capped at 200)
               (
                 incoming().diff(existing()).affectedKeys().hasOnly([
                   'balance', 'depositBalance', 'winningBalance', 'bonusBalance',
                   'totalWagered', 'gamesPlayed', 'wins', 'totalWon', 'winRate',
                   'weeklyScore', 'monthlyScore', 'streakDays', 'badges', 'updatedAt'
                 ]) &&
+                incoming().gamesPlayed == existing().gamesPlayed + 1 &&
+                incoming().bonusBalance <= existing().bonusBalance &&
                 incoming().balance <= existing().balance + 500000 &&
                 (
                   ('totalDeposited' in existing() && existing().totalDeposited >= 100) ||
                   incoming().winningBalance <= 200 ||
                   incoming().winningBalance <= existing().winningBalance
                 )
+              ) ||
+              // Action: Bounded bonus reward claim (daily, spin, mission, unlocked referral, or promo; never touches cash/deposit/winning balances)
+              (
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'balance', 'depositBalance', 'winningBalance', 'bonusBalance',
+                  'weeklyScore', 'monthlyScore', 'streakDays', 'badges', 'updatedAt'
+                ]) &&
+                incoming().depositBalance == existing().depositBalance &&
+                incoming().winningBalance == existing().winningBalance &&
+                incoming().bonusBalance >= existing().bonusBalance &&
+                incoming().bonusBalance <= existing().bonusBalance + 500
               )
             )
           )
@@ -567,7 +614,7 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Private User PII & Settings (Strict Owner/Admin Isolation)
+    // Private User PII & Settings (Strict Owner/Admin Isolation & Anti-Tampering)
     match /users/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
@@ -576,7 +623,13 @@ service cloud.firestore {
         && isValidUserPrivate(incoming())
         && isOwner(userId)
         && incoming().uid == request.auth.uid
+        && !('isAdmin' in incoming())
         && (!('role' in incoming()) || incoming().role == 'player' || isRootAdminEmail() || isAdmin())
+        && (!('balance' in incoming()) || incoming().balance == 0)
+        && (!('totalDeposited' in incoming()) || incoming().totalDeposited == 0)
+        && (!('bonusBalance' in incoming()) || (incoming().bonusBalance is number && incoming().bonusBalance >= 0 && incoming().bonusBalance <= 500))
+        && incoming().signupBonusClaimed == true
+        && (!('referralRewardUnlocked' in incoming()) || incoming().referralRewardUnlocked == false)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isVerifiedOrRootAdmin()
@@ -589,6 +642,12 @@ service cloud.firestore {
           isAdmin() ||
           (
             isOwner(userId) &&
+            !('isAdmin' in incoming()) &&
+            !('balance' in incoming()) &&
+            !('bonusBalance' in incoming()) &&
+            !('totalDeposited' in incoming()) &&
+            (!('role' in incoming()) || ('role' in existing() && incoming().role == existing().role)) &&
+            (!('signupBonusClaimed' in incoming()) || ('signupBonusClaimed' in existing() && incoming().signupBonusClaimed == existing().signupBonusClaimed)) &&
             incoming().email == existing().email &&
             (
               // Action: Update profile & preferences
@@ -599,12 +658,13 @@ service cloud.firestore {
               incoming().diff(existing()).affectedKeys().hasOnly([
                 'lastDailyClaimDate', 'lastSpinDate', 'streakDays', 'claimedMissions', 'updatedAt'
               ]) ||
-              // Action: Referral code initialization or unlocking after first game
+              // Action: Bind referral code (referralRewardUnlocked can ONLY be flipped to true by Admin on approved deposit)
               (
                 incoming().diff(existing()).affectedKeys().hasOnly([
                   'referralCode', 'referredBy', 'referralRewardUnlocked', 'updatedAt'
                 ]) &&
-                (!('referredBy' in existing()) || existing().referredBy == '' || incoming().referredBy == existing().referredBy)
+                (!('referredBy' in existing()) || existing().referredBy == '' || incoming().referredBy == existing().referredBy) &&
+                (!('referralRewardUnlocked' in incoming()) || incoming().referralRewardUnlocked == false || ('referralRewardUnlocked' in existing() && incoming().referralRewardUnlocked == existing().referralRewardUnlocked))
               ) ||
               // Action: Withdrawal cooldown & daily limit tracking
               (
@@ -620,7 +680,7 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Immutable Virtual Wallet Transactions
+    // Immutable Virtual Wallet Transactions (users read only their own; admins read/approve all)
     match /walletTransactions/{txId} {
       allow get: if isSignedIn() && isValidId(txId) && (
         (resource != null && existing().userId == request.auth.uid) ||
@@ -638,7 +698,12 @@ service cloud.firestore {
             incoming().userId == request.auth.uid &&
             incoming().type != 'admin_adjust' &&
             incoming().type != 'upi_deposit' &&
-            incoming().type != 'withdrawal_refund'
+            incoming().type != 'withdrawal_refund' &&
+            (incoming().type != 'mission_reward' || (incoming().amount >= 0 && incoming().amount <= 40)) &&
+            (incoming().type != 'referral_reward' || (incoming().amount >= 0 && incoming().amount <= 50)) &&
+            (incoming().type != 'daily_reward' || (incoming().amount >= 0 && incoming().amount <= 50)) &&
+            (incoming().type != 'spin_reward' || (incoming().amount >= 0 && incoming().amount <= 100)) &&
+            (incoming().type != 'signup_bonus' || (incoming().amount >= 0 && incoming().amount <= 500))
           )
         );
       allow update: if false;
@@ -764,7 +829,7 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Referral Tracking (unlocks strictly after first completed game)
+    // Referral Tracking (unlocks strictly when Admin approves friend's first deposit; +50 Bonus Coins)
     match /referrals/{referralId} {
       allow get: if isSignedIn() && isValidId(referralId) && (
         (resource == null && referralId == 'ref_' + request.auth.uid) ||
@@ -785,7 +850,7 @@ service cloud.firestore {
         && incoming().referralId == referralId
         && incoming().referredUid == request.auth.uid
         && incoming().status == 'pending'
-        && incoming().rewardAmount == 2000
+        && incoming().rewardAmount == 50
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isVerifiedOrRootAdmin()
@@ -799,14 +864,8 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
+          // Admin unlocks pending -> unlocked strictly upon approving invited friend's first deposit
           isAdmin() ||
-          // Action: Referred player finishes first real game -> unlocks reward
-          (
-            existing().status == 'pending' &&
-            incoming().status == 'unlocked' &&
-            existing().referredUid == request.auth.uid &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
-          ) ||
           // Action: Referrer claims unlocked bonus
           (
             existing().status == 'unlocked' &&
@@ -1054,6 +1113,22 @@ service cloud.firestore {
         && settingId == 'platform'
         && isValidPlatformSettings(incoming())
         && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Immutable One-Time Signup Bonus Claim Registry (Phone / Email / UID locks; create only when !exists; never update/delete)
+    match /signupBonusClaims/{claimId} {
+      allow get: if isSignedIn() && isValidId(claimId);
+      allow list: if isAdmin();
+      allow create: if isVerifiedOrRootAdmin()
+        && isValidId(claimId)
+        && !exists(/databases/$(database)/documents/signupBonusClaims/$(claimId))
+        && isValidSignupBonusClaim(incoming())
+        && incoming().claimId == claimId
+        && incoming().uid == request.auth.uid
+        && incoming().amount <= 500
+        && incoming().createdAt == request.time;
+      allow update: if false;
       allow delete: if false;
     }
   }

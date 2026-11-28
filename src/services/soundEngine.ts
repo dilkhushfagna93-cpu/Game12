@@ -597,21 +597,304 @@ class SoundEngine {
     }
   }
 
-  public playDiceRoll() {
-    for (let i = 0; i < 6; i++) {
-      const delay = i * 0.065;
-      this.playTone(320 + Math.random() * 260, 180, 0.04, 'square', 0.07, delay);
-      this.playNoise(0.045, 1600 + Math.random() * 800, 0.14, delay);
+  /**
+   * Subtle warm bell shimmer (1320Hz + 1980Hz, 120ms soft decay)
+   * triggered when a Ludo dice roll locks in on a lucky 6.
+   */
+  public playDiceSixAccent(delaySec = 0) {
+    if (!this.soundEnabled || this.volume <= 0) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const start = ctx.currentTime + Math.max(0, delaySec);
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(Math.min(0.25, 0.19 * this.volume), start);
+    master.connect(ctx.destination);
+
+    // Warm primary bell tone (1320Hz) + fifth harmonic shimmer (1980Hz), 120ms soft decay
+    const partials: Array<{ freq: number; peak: number; dur: number }> = [
+      { freq: 1320, peak: 0.62, dur: 0.125 },
+      { freq: 1980, peak: 0.34, dur: 0.115 },
+    ];
+    partials.forEach(({ freq, peak, dur }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, start);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.004, start + dur);
+
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(peak, start + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(start);
+      osc.stop(start + dur + 0.015);
+    });
+  }
+
+  /**
+   * Realistic 3-stage acrylic/wooden dice roll synthesizer (master gain <= 0.25):
+   * 1) Shake rattle (0ms–220ms): 4 randomized wooden/resin taps
+   * 2) Board double-bounce landing (260ms & 355ms): warm 540Hz wood + 1180Hz acrylic knocks
+   * 3) Optional Lucky 6 warm bell shimmer (1320Hz + 1980Hz) when rolledValue === 6
+   */
+  public playDiceRoll(rolledValue?: number) {
+    if (!this.soundEnabled || this.volume <= 0) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(Math.min(0.25, 0.24 * this.volume), now);
+    master.connect(ctx.destination);
+
+    const scheduleFilteredNoise = (
+      offsetSec: number,
+      durSec: number,
+      centerFreq: number,
+      q: number,
+      level: number,
+    ) => {
+      const start = now + offsetSec;
+      const sampleCount = Math.max(1, Math.floor(ctx.sampleRate * durSec));
+      const buffer = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < sampleCount; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sampleCount * 0.34));
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(centerFreq, start);
+      filter.Q.setValueAtTime(q, start);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(level, start);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + durSec);
+
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(master);
+      src.start(start);
+    };
+
+    // Stage 1: Shake Rattle (0ms–220ms) — 4 rapid randomized wooden/resin rattle taps
+    const baseOffsets = [0.004, 0.062, 0.126, 0.19];
+    baseOffsets.forEach((baseOffset, idx) => {
+      const jitterOffset = Math.max(0, Math.min(0.202, baseOffset + (Math.random() - 0.5) * 0.016));
+      const start = now + jitterOffset;
+      const bodyFreq = 900 + Math.random() * 450; // 900Hz–1350Hz
+      const tapLevel = 0.42 + (idx % 2) * 0.14 + Math.random() * 0.08;
+
+      // 18ms short wooden/resin body transient
+      const bodyOsc = ctx.createOscillator();
+      const bodyGain = ctx.createGain();
+      bodyOsc.type = 'triangle';
+      bodyOsc.frequency.setValueAtTime(bodyFreq, start);
+      bodyOsc.frequency.exponentialRampToValueAtTime(bodyFreq * 0.82, start + 0.018);
+
+      bodyGain.gain.setValueAtTime(0.0001, start);
+      bodyGain.gain.linearRampToValueAtTime(tapLevel, start + 0.002);
+      bodyGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.018);
+
+      bodyOsc.connect(bodyGain);
+      bodyGain.connect(master);
+      bodyOsc.start(start);
+      bodyOsc.stop(start + 0.022);
+
+      // Matching bandpass-filtered resin rattle click
+      scheduleFilteredNoise(jitterOffset, 0.018, 1950 + Math.random() * 750, 2.0, tapLevel * 0.58);
+    });
+
+    // Stage 2: Board Double-Bounce Landing (260ms & 355ms)
+    const scheduleBoardKnock = (offsetSec: number, gainMult: number, pitchShift: number) => {
+      const start = now + offsetSec;
+      const decay = 0.045; // 45ms exponential decay
+
+      // Warm wood board resonance (~540Hz)
+      const woodOsc = ctx.createOscillator();
+      const woodGain = ctx.createGain();
+      woodOsc.type = 'triangle';
+      woodOsc.frequency.setValueAtTime(540 * pitchShift, start);
+      woodOsc.frequency.exponentialRampToValueAtTime(455 * pitchShift, start + decay);
+      woodGain.gain.setValueAtTime(0.0001, start);
+      woodGain.gain.linearRampToValueAtTime(0.82 * gainMult, start + 0.0025);
+      woodGain.gain.exponentialRampToValueAtTime(0.0001, start + decay);
+      woodOsc.connect(woodGain);
+      woodGain.connect(master);
+      woodOsc.start(start);
+      woodOsc.stop(start + decay + 0.008);
+
+      // Crisp acrylic die click (~1180Hz)
+      const clickOsc = ctx.createOscillator();
+      const clickGain = ctx.createGain();
+      clickOsc.type = 'sine';
+      clickOsc.frequency.setValueAtTime(1180 * pitchShift, start);
+      clickOsc.frequency.exponentialRampToValueAtTime(1020 * pitchShift, start + decay);
+      clickGain.gain.setValueAtTime(0.0001, start);
+      clickGain.gain.linearRampToValueAtTime(0.56 * gainMult, start + 0.002);
+      clickGain.gain.exponentialRampToValueAtTime(0.0001, start + decay);
+      clickOsc.connect(clickGain);
+      clickGain.connect(master);
+      clickOsc.start(start);
+      clickOsc.stop(start + decay + 0.008);
+
+      // Tactile surface contact transient
+      scheduleFilteredNoise(offsetSec, 0.016, 1850 * pitchShift, 1.6, 0.36 * gainMult);
+    };
+
+    // 1st landing knock at 260ms (full), 2nd soft settle bounce at 355ms (45% gain)
+    scheduleBoardKnock(0.26, 1.0, 1.0);
+    scheduleBoardKnock(0.355, 0.45, 1.03);
+
+    // Stage 3: Lucky 6 Accent when rolled value is known upfront
+    if (rolledValue === 6) {
+      this.playDiceSixAccent(0.415);
     }
   }
 
+  /**
+   * Crisp, warm wooden/acrylic board-piece tap (~650Hz + 1300Hz, 40ms decay)
+   * played on every single Ludo tile hop (~160ms interval).
+   */
+  public playLudoStepHop() {
+    if (!this.soundEnabled || this.volume <= 0) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const jitter = 0.97 + Math.random() * 0.06;
+
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(Math.min(0.32, 0.28 * this.volume), now);
+    master.connect(ctx.destination);
+
+    // 1. Warm wooden/acrylic fundamental body tap (~650Hz -> ~520Hz, 40ms decay)
+    const bodyOsc = ctx.createOscillator();
+    const bodyGain = ctx.createGain();
+    bodyOsc.type = 'triangle';
+    bodyOsc.frequency.setValueAtTime(650 * jitter, now);
+    bodyOsc.frequency.exponentialRampToValueAtTime(510 * jitter, now + 0.04);
+    bodyGain.gain.setValueAtTime(0.0001, now);
+    bodyGain.gain.linearRampToValueAtTime(0.72, now + 0.0025);
+    bodyGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.042);
+    bodyOsc.connect(bodyGain);
+    bodyGain.connect(master);
+    bodyOsc.start(now);
+    bodyOsc.stop(now + 0.048);
+
+    // 2. Crisp acrylic overtone click (~1300Hz -> ~1120Hz, 38ms decay)
+    const clickOsc = ctx.createOscillator();
+    const clickGain = ctx.createGain();
+    clickOsc.type = 'sine';
+    clickOsc.frequency.setValueAtTime(1300 * jitter, now);
+    clickOsc.frequency.exponentialRampToValueAtTime(1120 * jitter, now + 0.036);
+    clickGain.gain.setValueAtTime(0.0001, now);
+    clickGain.gain.linearRampToValueAtTime(0.42, now + 0.002);
+    clickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.04);
+    clickOsc.connect(clickGain);
+    clickGain.connect(master);
+    clickOsc.start(now);
+    clickOsc.stop(now + 0.045);
+
+    // 3. Short percussive board-contact transient (14ms filtered noise click)
+    const dur = 0.014;
+    const sampleCount = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buffer = ctx.createBuffer(1, sampleCount, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sampleCount * 0.3));
+    }
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = buffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(2400 * jitter, now);
+    filter.Q.setValueAtTime(1.8, now);
+
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.32, now);
+    nGain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    noiseSrc.connect(filter);
+    filter.connect(nGain);
+    nGain.connect(master);
+    noiseSrc.start(now);
+  }
+
+  /**
+   * Bright ascending two-note chime when a Ludo token exits its home yard onto the start square.
+   */
+  public playLudoUnlock() {
+    if (!this.soundEnabled || this.volume <= 0) return;
+    // Crisp tap + sparkling G5 -> C6 ascending chime
+    this.playLudoStepHop();
+    this.playTone(783.99, 792.0, 0.13, 'triangle', 0.18, 0.01);
+    this.playTone(1567.98, 1580.0, 0.09, 'sine', 0.08, 0.01);
+    this.playTone(1046.5, 1058.0, 0.22, 'triangle', 0.21, 0.085);
+    this.playTone(2093.0, 2110.0, 0.15, 'sine', 0.09, 0.085);
+  }
+
+  /**
+   * Punchy impact pop + descending sweep when capturing an opponent's Ludo piece.
+   */
+  public playLudoCapture() {
+    if (!this.soundEnabled || this.volume <= 0) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    // 1. Punchy impact pop (fast low-mid thump + crisp smack transient)
+    this.playTone(290, 88, 0.095, 'sine', 0.26, 0);
+    this.playNoise(0.075, 1150, 0.24, 0);
+
+    // 2. Descending knock-back sweep
+    const osc = ctx.createOscillator();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(680, now + 0.025);
+    osc.frequency.exponentialRampToValueAtTime(155, now + 0.27);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1600, now + 0.025);
+    filter.frequency.exponentialRampToValueAtTime(380, now + 0.27);
+
+    gain.gain.setValueAtTime(0.0001, now + 0.025);
+    gain.gain.linearRampToValueAtTime(0.19 * this.volume, now + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now + 0.025);
+    osc.stop(now + 0.3);
+  }
+
+  /**
+   * Sparkling major triad chime when landing on a Safe Star tile or entering the center Home crown.
+   */
+  public playLudoSafeOrHome() {
+    if (!this.soundEnabled || this.volume <= 0) return;
+    const notes = [1046.5, 1318.51, 1567.98, 2093.0];
+    notes.forEach((n, idx) => {
+      const delay = idx * 0.055;
+      this.playTone(n, n * 1.006, 0.24, 'sine', idx === 3 ? 0.13 : 0.17, delay);
+      this.playTone(n * 0.5, n * 0.502, 0.18, 'triangle', 0.07, delay);
+    });
+  }
+
   public playTokenHop() {
-    this.playTone(440, 660, 0.085, 'sine', 0.16);
+    this.playLudoStepHop();
   }
 
   public playTokenCapture() {
-    this.playTone(540, 160, 0.22, 'sawtooth', 0.18);
-    this.playNoise(0.16, 900, 0.2, 0.02);
+    this.playLudoCapture();
   }
 
   public playCoinReward() {

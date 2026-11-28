@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
   CheckCircle2,
+  Download,
   Eye,
   EyeOff,
   Gift,
@@ -11,10 +12,12 @@ import {
   Mail,
   Phone,
   ShieldCheck,
+  Smartphone,
   User,
 } from 'lucide-react';
 import { VIRTUAL_COIN_DISCLAIMER } from '../config/assets';
 import { useApp } from '../context/AppContext';
+import { usePwaInstall } from '../context/PwaInstallContext';
 import { soundEngine } from '../services/soundEngine';
 
 type AuthTab = 'login' | 'signup';
@@ -49,9 +52,16 @@ export default function AuthPage() {
     lookupPasswordRecovery,
     verifyRecoveryFullName,
     completePasswordRecovery,
+    platformSettings,
   } = useApp();
+  const { isInstalled, triggerInstall } = usePwaInstall();
   const location = useLocation();
   const navigate = useNavigate();
+
+  const configuredSignupBonus = Math.max(
+    0,
+    Math.round(platformSettings.signupBonus ?? platformSettings.welcomeBonusAmount ?? 0),
+  );
 
   const initialTab: AuthTab = location.pathname === '/register' ? 'signup' : 'login';
   const [activeTab, setActiveTab] = useState<AuthTab>(initialTab);
@@ -218,7 +228,7 @@ export default function AuthPage() {
 
     setBusy(true);
     try {
-      await registerWithCredentials({
+      const nextBalance = await registerWithCredentials({
         fullName: cleanName,
         contactType,
         mobile: contactType === 'mobile' ? mobile : undefined,
@@ -226,7 +236,11 @@ export default function AuthPage() {
         password: signupPassword,
         referralCode: cleanRef || undefined,
       });
-      navigate('/wallet?tab=deposit', { replace: true, state: { openDepositDesk: true } });
+      if (nextBalance <= 0) {
+        navigate('/wallet?tab=deposit', { replace: true, state: { openDepositDesk: true } });
+      } else {
+        navigate('/', { replace: true });
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Unable to create account. Please try again.');
     } finally {
@@ -249,7 +263,7 @@ export default function AuthPage() {
         }
       }
       const nextBalance = await signInWithGoogle();
-      if (activeTab === 'signup' || nextBalance <= 0) {
+      if (nextBalance <= 0) {
         navigate('/wallet?tab=deposit', { replace: true, state: { openDepositDesk: true } });
       } else {
         navigate('/', { replace: true });
@@ -1057,7 +1071,11 @@ export default function AuthPage() {
 
                 <p className="text-[11px] text-zinc-400 text-center flex items-center justify-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5 text-[#d4af37] shrink-0" aria-hidden="true" />
-                  <span>New accounts start with ₹0 balance · Add funds in Wallet anytime</span>
+                  <span>
+                    {configuredSignupBonus > 0
+                      ? `Welcome Bonus: +₹${configuredSignupBonus} credited once to your Bonus Wallet`
+                      : 'New accounts start with ₹0 balance · Add funds in Wallet anytime'}
+                  </span>
                 </p>
               </form>
             )}
@@ -1076,6 +1094,27 @@ export default function AuthPage() {
                 >
                   Continue with Google
                 </button>
+
+                {!isInstalled && (
+                  <button
+                    type="button"
+                    onClick={() => void triggerInstall()}
+                    className="w-full min-h-[52px] py-2.5 px-4 rounded-xl border border-[#d4af37]/50 bg-gradient-to-r from-[#d4af37]/15 via-[#d4af37]/10 to-[#d4af37]/15 hover:from-[#d4af37]/25 hover:to-[#d4af37]/25 transition-all flex items-center justify-center gap-3 text-left group cursor-pointer shadow-[0_0_20px_rgba(212,175,55,0.12)]"
+                  >
+                    <span className="w-8 h-8 rounded-lg bg-[#d4af37]/20 border border-[#d4af37]/45 flex items-center justify-center text-[#f6dc93] shrink-0 group-hover:scale-105 transition-transform">
+                      <Smartphone className="w-4 h-4" aria-hidden="true" />
+                    </span>
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-xs sm:text-sm font-bold text-[#f8e7b5] leading-tight flex items-center gap-1.5">
+                        <span>Install Aurelia Arena App</span>
+                        <Download className="w-3.5 h-3.5 text-[#d4af37] shrink-0" aria-hidden="true" />
+                      </span>
+                      <span className="text-[10px] sm:text-[11px] text-zinc-400 leading-tight mt-0.5">
+                        One-tap install • Full-screen 3D play
+                      </span>
+                    </span>
+                  </button>
+                )}
               </>
             )}
           </div>

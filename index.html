@@ -3,32 +3,71 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Aurelia Arena – Ultra-Realistic 3D Dragon Tiger, Ludo & Aviator</title>
+    <title>Aurelia Arena – 3D Teen Patti, Ludo, Dragon Tiger &amp; Aviator</title>
     <meta
       name="description"
-      content="Play ultra-realistic 3D Dragon Tiger, tabletop Ludo with AI or friends, and cinematic 3D Aviator flight directly in your browser using virtual coins."
+      content="Play ultra-realistic 3D Teen Patti, Ludo, Dragon Tiger, and Aviator right in your browser with real-time multiplayer, fair RNG, and daily rewards."
     />
+    <meta
+      name="keywords"
+      content="Aurelia Arena, 3D Teen Patti, Ludo 3D online, Dragon Tiger 3D, Aviator 3D game, browser 3D card games, multiplayer Ludo India"
+    />
+    <meta name="author" content="Aurelia Arena" />
+    <meta name="application-name" content="Aurelia Arena" />
+    <meta
+      name="robots"
+      content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"
+    />
+    <!-- CANONICAL_TAG -->
+
+    <!-- OpenGraph Social Share Card -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Aurelia Arena" />
-    <meta property="og:title" content="Aurelia Arena – Ultra-Realistic 3D Multi-Game Platform" />
+    <meta property="og:locale" content="en_IN" />
+    <meta property="og:url" content="/" />
+    <meta property="og:title" content="Aurelia Arena – 3D Teen Patti, Ludo, Dragon Tiger &amp; Aviator" />
     <meta
       property="og:description"
-      content="Experience physically rendered 3D Dragon Tiger, Ludo, and Aviator with virtual coins, daily rewards, and real-time leaderboards."
+      content="Play ultra-realistic 3D Teen Patti, Ludo, Dragon Tiger, and Aviator right in your browser with real-time multiplayer, fair RNG, and daily rewards."
     />
+    <meta property="og:image" content="/og/og-home.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:alt" content="Aurelia Arena 3D Teen Patti, Ludo, Dragon Tiger and Aviator gaming platform" />
+
+    <!-- Twitter / X Social Card -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Aurelia Arena – Ultra-Realistic 3D Gaming" />
+    <meta name="twitter:title" content="Aurelia Arena – 3D Teen Patti, Ludo, Dragon Tiger &amp; Aviator" />
     <meta
       name="twitter:description"
-      content="Play interactive 3D Dragon Tiger, Ludo, and Aviator in browser with virtual coins. Free to play, no cash value."
+      content="Play ultra-realistic 3D Teen Patti, Ludo, Dragon Tiger, and Aviator in your browser with real-time multiplayer and provably fair RNG."
     />
-    <meta name="theme-color" content="#07060b" />
+    <meta name="twitter:image" content="/og/og-home.jpg" />
+    <meta name="twitter:image:alt" content="Aurelia Arena 3D Gaming Platform" />
+
+    <meta name="theme-color" content="#0B0B10" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Aurelia3D" />
-    <link rel="manifest" href="/manifest.json" />
+    <meta name="apple-mobile-web-app-title" content="Aurelia Arena" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <script>
+      (function () {
+        window.__aureliaDeferredInstallPrompt = null;
+        window.__aureliaAppInstalled = false;
+        window.addEventListener('beforeinstallprompt', function (event) {
+          event.preventDefault();
+          window.__aureliaDeferredInstallPrompt = event;
+          window.dispatchEvent(new CustomEvent('aurelia:pwa-prompt-ready'));
+        });
+        window.addEventListener('appinstalled', function () {
+          window.__aureliaDeferredInstallPrompt = null;
+          window.__aureliaAppInstalled = true;
+          window.dispatchEvent(new CustomEvent('aurelia:pwa-installed'));
+        });
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -38,16 +77,120 @@
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
-        "@type": "WebApplication",
-        "name": "Aurelia Arena",
-        "applicationCategory": "GameApplication",
-        "operatingSystem": "All",
-        "description": "Ultra-realistic 3D browser gaming platform featuring Dragon Tiger, Ludo, and Aviator using virtual coins with no real-world monetary value.",
-        "offers": {
-          "@type": "Offer",
-          "price": "0",
-          "priceCurrency": "USD"
-        }
+        "@graph": [
+          {
+            "@type": "Organization",
+            "name": "Aurelia Arena",
+            "logo": "/pwa-512x512.png"
+          },
+          {
+            "@type": "WebSite",
+            "name": "Aurelia Arena",
+            "inLanguage": "en-IN",
+            "description": "Ultra-realistic 3D browser gaming platform featuring Teen Patti 3D, Ludo 3D, Dragon Tiger 3D, and Aviator Ascent."
+          },
+          {
+            "@type": "WebApplication",
+            "name": "Aurelia Arena",
+            "applicationCategory": "GameApplication",
+            "operatingSystem": "Web, Android, iOS",
+            "browserRequirements": "Requires JavaScript and WebGL",
+            "description": "Play ultra-realistic 3D Teen Patti, Ludo, Dragon Tiger, and Aviator in your browser with real-time multiplayer, fair RNG, and daily rewards.",
+            "image": "/og/og-home.jpg",
+            "featureList": [
+              "Teen Patti 3D with Blind, Chaal, and Side Show",
+              "Ludo 3D Quick 1-Token, Classic 4-Token, and Private Rooms",
+              "Dragon Tiger 3D Asian Temple Card Battle",
+              "Aviator Ascent 3D Live Multiplier",
+              "Server-Authoritative Provably Fair RNG",
+              "Mobile PWA & Full-Screen Responsive Gameplay"
+            ],
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "INR"
+            }
+          },
+          {
+            "@type": "ItemList",
+            "name": "Aurelia Arena Featured 3D Games",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 1,
+                "item": {
+                  "@type": "VideoGame",
+                  "name": "Teen Patti 3D",
+                  "url": "/games/teen-patti",
+                  "genre": ["Card Game", "Multiplayer"],
+                  "image": "/og/og-teen-patti.jpg"
+                }
+              },
+              {
+                "@type": "ListItem",
+                "position": 2,
+                "item": {
+                  "@type": "VideoGame",
+                  "name": "Ludo 3D",
+                  "url": "/games/ludo",
+                  "genre": ["Board Game", "Multiplayer"],
+                  "image": "/og/og-ludo.jpg"
+                }
+              },
+              {
+                "@type": "ListItem",
+                "position": 3,
+                "item": {
+                  "@type": "VideoGame",
+                  "name": "Dragon Tiger 3D",
+                  "url": "/games/dragon-tiger",
+                  "genre": ["Card Game", "Arcade"],
+                  "image": "/og/og-dragon-tiger.jpg"
+                }
+              },
+              {
+                "@type": "ListItem",
+                "position": 4,
+                "item": {
+                  "@type": "VideoGame",
+                  "name": "Aviator Ascent 3D",
+                  "url": "/games/aviator",
+                  "genre": ["Arcade", "Simulation"],
+                  "image": "/og/og-aviator.jpg"
+                }
+              }
+            ]
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Which 3D games can I play on Aurelia Arena?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Aurelia Arena features four interactive 3D browser games: Teen Patti 3D, Ludo 3D (Quick, Classic, and Private Rooms), Dragon Tiger 3D, and Aviator Ascent 3D."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Are dice rolls and card deals on Aurelia Arena fair?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. Ludo dice rolls, card shuffles, and Aviator flight multipliers use server-authoritative cryptographic RNG with provably fair hash verification."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Can I play Aurelia Arena on mobile phones?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. Aurelia Arena is a mobile-ready Progressive Web App (PWA) optimized for Android and iOS browsers with full-screen installation support."
+                }
+              }
+            ]
+          }
+        ]
       }
     </script>
   </head>

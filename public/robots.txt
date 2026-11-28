@@ -1,5 +1,12 @@
 User-agent: *
 Allow: /
 Disallow: /admin
+Disallow: /api/
+Disallow: /wallet
+Disallow: /transactions
+Disallow: /history
+Disallow: /profile
+Disallow: /login
+Disallow: /register
 
 Sitemap: /sitemap.xml

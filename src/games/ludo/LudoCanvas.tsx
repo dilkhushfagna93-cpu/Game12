@@ -15,6 +15,7 @@ import {
   HOME_STRETCH_COORDS,
   MAIN_TRACK_COORDS,
   SAFE_TRACK_INDICES,
+  START_OFFSET,
 } from './ludoLogic';
 
 export interface LudoCanvasProps {
@@ -723,7 +724,7 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
     scene.environment = envTex;
     pmrem.dispose();
 
-    const camera = new THREE.PerspectiveCamera(34, initialSize.aspect, 0.1, 80);
+    const camera = new THREE.PerspectiveCamera(34, initialSize.aspect, 1.0, 80);
     const viewMetrics = {
       aspect: initialSize.aspect,
       fov: 34,
@@ -768,21 +769,22 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
       envMapIntensity: 1.15,
     });
 
+    // Board chassis sits cleanly below y = 0 so NO metallic gold face can ever Z-fight with the 15x15 board surface
     const boardBase = new THREE.Mesh(
-      new THREE.BoxGeometry(BOARD_FRAME_EXTENT, 0.36, BOARD_FRAME_EXTENT),
+      new THREE.BoxGeometry(BOARD_FRAME_EXTENT, 0.32, BOARD_FRAME_EXTENT),
       goldRimMat,
     );
-    boardBase.position.y = -0.18;
-    boardBase.receiveShadow = true;
+    boardBase.position.y = -0.22;
     boardGroup.add(boardBase);
 
-    // 4 Vibrant Colorful Corner Bumper Accents wrapping the board corners (Red, Green, Yellow, Blue)
-    const bumperSpan = BOARD_FRAME_EXTENT * 0.44;
+    // 4 Vibrant Colorful Corner Bumper Accents wrapping the outer frame corners (Red, Green, Yellow, Blue)
+    const bumperSpan = BOARD_FRAME_EXTENT * 0.42;
+    const bumperOffset = BOARD_FRAME_EXTENT * 0.5 - bumperSpan * 0.5 + 0.02;
     const bumperConfigs: Array<{ color: LudoColor; x: number; z: number }> = [
-      { color: 'red', x: -BOARD_FRAME_EXTENT * 0.29, z: -BOARD_FRAME_EXTENT * 0.29 },
-      { color: 'green', x: BOARD_FRAME_EXTENT * 0.29, z: -BOARD_FRAME_EXTENT * 0.29 },
-      { color: 'yellow', x: BOARD_FRAME_EXTENT * 0.29, z: BOARD_FRAME_EXTENT * 0.29 },
-      { color: 'blue', x: -BOARD_FRAME_EXTENT * 0.29, z: BOARD_FRAME_EXTENT * 0.29 },
+      { color: 'red', x: -bumperOffset, z: -bumperOffset },
+      { color: 'green', x: bumperOffset, z: -bumperOffset },
+      { color: 'yellow', x: bumperOffset, z: bumperOffset },
+      { color: 'blue', x: -bumperOffset, z: bumperOffset },
     ];
     bumperConfigs.forEach(({ color, x, z }) => {
       const bumperMat = new THREE.MeshPhysicalMaterial({
@@ -794,21 +796,33 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
         clearcoat: 1.0,
       });
       const bumper = new THREE.Mesh(
-        new THREE.BoxGeometry(bumperSpan, 0.38, bumperSpan),
+        new THREE.BoxGeometry(bumperSpan, 0.3, bumperSpan),
         bumperMat,
       );
-      bumper.position.set(x, -0.18, z);
+      bumper.position.set(x, -0.2, z);
       boardGroup.add(bumper);
     });
 
-    const innerGoldTrim = new THREE.Mesh(
-      new THREE.BoxGeometry(BOARD_SIZE + 0.18, 0.06, BOARD_SIZE + 0.18),
-      goldRimMat,
-    );
-    innerGoldTrim.position.y = -0.008;
-    boardGroup.add(innerGoldTrim);
+    // Hollow 4-rail inner gold trim strictly OUTSIDE the playable 15x15 board (never passes underneath or coplanar with boardSurface)
+    const trimWidth = 0.11;
+    const trimHeight = 0.04;
+    const trimY = -0.02;
+    const trimSpan = BOARD_SIZE + trimWidth * 2;
+    const trimEdge = BOARD_SIZE * 0.5 + trimWidth * 0.5;
+    const horizontalRailGeo = new THREE.BoxGeometry(trimSpan, trimHeight, trimWidth);
+    const verticalRailGeo = new THREE.BoxGeometry(trimWidth, trimHeight, BOARD_SIZE);
 
-    // Matte low-envMap board material so NO white studio glare ever hazes/washes out the crisp HD board colors!
+    const topTrim = new THREE.Mesh(horizontalRailGeo, goldRimMat);
+    topTrim.position.set(0, trimY, -trimEdge);
+    const bottomTrim = new THREE.Mesh(horizontalRailGeo, goldRimMat);
+    bottomTrim.position.set(0, trimY, trimEdge);
+    const leftTrim = new THREE.Mesh(verticalRailGeo, goldRimMat);
+    leftTrim.position.set(-trimEdge, trimY, 0);
+    const rightTrim = new THREE.Mesh(verticalRailGeo, goldRimMat);
+    rightTrim.position.set(trimEdge, trimY, 0);
+    boardGroup.add(topTrim, bottomTrim, leftTrim, rightTrim);
+
+    // Matte low-envMap board material cleanly elevated above the chassis so ZERO Z-fighting or glare ever covers the 15x15 grid
     const boardSurface = new THREE.Mesh(
       new THREE.PlaneGeometry(BOARD_SIZE, BOARD_SIZE),
       new THREE.MeshStandardMaterial({
@@ -823,34 +837,39 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
     boardSurface.receiveShadow = true;
     boardGroup.add(boardSurface);
 
-    // Crisp glowing golden active-turn border frame over the current player's home yard
+    // Crisp glowing golden active-turn border frame built from 4 non-overlapping edge bars around the current player's home yard
     const yardGlowSize = 6 * CELL_SIZE - 0.04;
-    const yardGlowShape = new THREE.Shape();
-    const h = yardGlowSize / 2;
-    yardGlowShape.moveTo(-h, -h);
-    yardGlowShape.lineTo(h, -h);
-    yardGlowShape.lineTo(h, h);
-    yardGlowShape.lineTo(-h, h);
-    yardGlowShape.closePath();
-    const hole = new THREE.Path();
-    const ih = h - 0.18;
-    hole.moveTo(-ih, -ih);
-    hole.lineTo(ih, -ih);
-    hole.lineTo(ih, ih);
-    hole.lineTo(-ih, ih);
-    hole.closePath();
-    yardGlowShape.holes.push(hole);
-
+    const yardGlowBarThickness = 0.14;
+    const yardGlowHalf = yardGlowSize / 2;
     const yardGlowMat = new THREE.MeshBasicMaterial({
       color: 0xffe633,
       transparent: true,
       opacity: 0.92,
-      side: THREE.DoubleSide,
       depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     });
-    const yardGlowFrame = new THREE.Mesh(new THREE.ShapeGeometry(yardGlowShape), yardGlowMat);
-    yardGlowFrame.rotation.x = -Math.PI / 2;
-    yardGlowFrame.position.y = 0.03;
+    const yardGlowFrame = new THREE.Group();
+    const glowHorizGeo = new THREE.PlaneGeometry(yardGlowSize, yardGlowBarThickness);
+    const glowVertGeo = new THREE.PlaneGeometry(
+      yardGlowBarThickness,
+      yardGlowSize - yardGlowBarThickness * 2,
+    );
+    const glowBars: Array<{ geo: THREE.PlaneGeometry; x: number; z: number }> = [
+      { geo: glowHorizGeo, x: 0, z: -(yardGlowHalf - yardGlowBarThickness / 2) },
+      { geo: glowHorizGeo, x: 0, z: yardGlowHalf - yardGlowBarThickness / 2 },
+      { geo: glowVertGeo, x: -(yardGlowHalf - yardGlowBarThickness / 2), z: 0 },
+      { geo: glowVertGeo, x: yardGlowHalf - yardGlowBarThickness / 2, z: 0 },
+    ];
+    glowBars.forEach(({ geo, x, z }) => {
+      const bar = new THREE.Mesh(geo, yardGlowMat);
+      bar.rotation.x = -Math.PI / 2;
+      bar.position.set(x, 0, z);
+      bar.renderOrder = 2;
+      yardGlowFrame.add(bar);
+    });
+    yardGlowFrame.position.y = 0.044;
     boardGroup.add(yardGlowFrame);
 
     // =========================================================================
@@ -899,8 +918,20 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
       map: shadowTex,
       transparent: true,
       depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
     });
     const selectRingGeo = new THREE.PlaneGeometry(0.9, 0.9);
+
+    type HopStepKind = 'hop' | 'unlock' | 'captured';
+
+    interface QueuedHopStep {
+      step: number;
+      kind: HopStepKind;
+      duration: number;
+      triggersCapture?: boolean;
+    }
 
     interface TokenActor {
       color: LudoColor;
@@ -910,10 +941,14 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
       selectRing: THREE.Mesh;
       hitProxy: THREE.Mesh;
       lastProgress: number;
-      stepQueue: number[];
+      stepQueue: QueuedHopStep[];
+      currentStep: QueuedHopStep | null;
+      captureDelaySec: number;
+      pendingCaptureReturn: boolean;
       fromPos: THREE.Vector3;
       toPos: THREE.Vector3;
       hopT: number;
+      bounceT: number;
       currentPos: THREE.Vector3;
       isMoving: boolean;
     }
@@ -940,6 +975,9 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
         transparent: true,
         opacity: 0.98,
         depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
       });
 
       for (let i = 0; i < 4; i++) {
@@ -947,12 +985,14 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
 
         const shadowDisc = new THREE.Mesh(contactShadowGeo, contactShadowMat);
         shadowDisc.rotation.x = -Math.PI / 2;
-        shadowDisc.position.y = 0.025;
+        shadowDisc.position.y = 0.008;
+        shadowDisc.renderOrder = 1;
         root.add(shadowDisc);
 
         const selectRing = new THREE.Mesh(selectRingGeo, selectRingMat);
         selectRing.rotation.x = -Math.PI / 2;
-        selectRing.position.y = 0.036;
+        selectRing.position.y = 0.014;
+        selectRing.renderOrder = 3;
         selectRing.visible = false;
         root.add(selectRing);
 
@@ -1002,9 +1042,13 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
           hitProxy,
           lastProgress: initProg,
           stepQueue: [],
+          currentStep: null,
+          captureDelaySec: 0,
+          pendingCaptureReturn: false,
           fromPos: initVec.clone(),
           toPos: initVec.clone(),
           hopT: 1,
+          bounceT: 0,
           currentPos: initVec.clone(),
           isMoving: false,
         });
@@ -1056,7 +1100,7 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
       BOARD_FRAME_EXTENT,
       viewMetrics.aspect,
       viewMetrics.fov,
-      0.975,
+      0.955,
       0.1,
     );
     camera.position.set(0, initialDist, initialDist * 0.1);
@@ -1083,7 +1127,7 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
       // Animate glowing golden turn border over the active player's corner yard
       const [ycCol, ycRow] = LUDO_KING_HEX[turnColor].yardCenter;
       const [yx, yz] = gridToWorld(ycCol - 0.5, ycRow - 0.5);
-      yardGlowFrame.position.set(yx, 0.03, yz);
+      yardGlowFrame.position.set(yx, 0.044, yz);
       yardGlowMat.opacity = 0.55 + Math.abs(Math.sin(t * 4.5)) * 0.45;
 
       // Compute final resting stack offsets for tokens sharing a tile
@@ -1101,77 +1145,264 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
         actorOffset.set(actor, [ox, oz, count]);
       }
 
+      const STEP_DURATION_SEC = 0.27;
+      const UNLOCK_DURATION_SEC = 0.32;
+      const CAPTURE_RETURN_DURATION_SEC = 0.3;
+
+      // Pass 1: Detect forward movers first so real captures can synchronize victim return & sound with attacker touchdown
+      const forwardMovers: Array<{
+        actor: TokenActor;
+        prevProg: number;
+        targetProg: number;
+        destAbsIdx: number | null;
+        totalDurationSec: number;
+      }> = [];
+
       for (const actor of actors) {
         const isActiveColor = active.includes(actor.color);
         actor.group.visible = isActiveColor;
         if (!isActiveColor) continue;
 
         const targetProg = tokState[actor.color][actor.index];
+        if (targetProg === actor.lastProgress) continue;
+
+        if (targetProg > actor.lastProgress) {
+          const prevProg = actor.lastProgress;
+          const stepStart = prevProg === -1 ? 0 : prevProg + 1;
+          const stepsCount = Math.max(1, targetProg - stepStart + 1);
+          const totalDurationSec =
+            prevProg === -1 && targetProg === 0
+              ? UNLOCK_DURATION_SEC
+              : (prevProg === -1 ? UNLOCK_DURATION_SEC : 0) +
+                (prevProg === -1 ? Math.max(0, stepsCount - 1) : stepsCount) * STEP_DURATION_SEC;
+
+          const destAbsIdx =
+            targetProg >= 0 && targetProg <= 51
+              ? (START_OFFSET[actor.color] + targetProg) % 52
+              : null;
+
+          forwardMovers.push({
+            actor,
+            prevProg,
+            targetProg,
+            destAbsIdx,
+            totalDurationSec,
+          });
+        }
+      }
+
+      // Pass 2: Enqueue step-by-step hops for ALL active colors (Red, Green, Yellow, Blue) and sync captured pieces
+      for (const mover of forwardMovers) {
+        const { actor, prevProg, targetProg } = mover;
+        if (prevProg === -1 && targetProg === 0) {
+          actor.stepQueue.push({
+            step: 0,
+            kind: 'unlock',
+            duration: UNLOCK_DURATION_SEC,
+          });
+        } else if (prevProg === -1 && targetProg > 0) {
+          actor.stepQueue.push({
+            step: 0,
+            kind: 'unlock',
+            duration: UNLOCK_DURATION_SEC,
+          });
+          for (let s = 1; s <= targetProg; s++) {
+            actor.stepQueue.push({
+              step: s,
+              kind: 'hop',
+              duration: STEP_DURATION_SEC,
+            });
+          }
+        } else if (targetProg - prevProg <= 18) {
+          for (let s = prevProg + 1; s <= targetProg; s++) {
+            actor.stepQueue.push({
+              step: s,
+              kind: 'hop',
+              duration: STEP_DURATION_SEC,
+            });
+          }
+        } else {
+          actor.stepQueue.push({
+            step: targetProg,
+            kind: 'hop',
+            duration: STEP_DURATION_SEC,
+          });
+        }
+        actor.lastProgress = targetProg;
+      }
+
+      for (const actor of actors) {
+        const isActiveColor = active.includes(actor.color);
+        if (!isActiveColor) continue;
+
+        const targetProg = tokState[actor.color][actor.index];
+        if (targetProg !== actor.lastProgress && targetProg < actor.lastProgress) {
+          const prevProg = actor.lastProgress;
+          actor.lastProgress = targetProg;
+
+          if (targetProg === -1 && prevProg >= 0 && prevProg <= 51) {
+            const victimAbsIdx = (START_OFFSET[actor.color] + prevProg) % 52;
+            const attacker = forwardMovers.find(
+              (m) => m.actor.color !== actor.color && m.destAbsIdx === victimAbsIdx,
+            );
+            if (attacker && attacker.actor.stepQueue.length > 0) {
+              // Synchronize capture impact sound and victim return with the attacker's landing step
+              attacker.actor.stepQueue[attacker.actor.stepQueue.length - 1].triggersCapture = true;
+              actor.stepQueue.length = 0;
+              actor.currentStep = null;
+              actor.isMoving = false;
+              actor.captureDelaySec = Math.max(0.05, attacker.totalDurationSec - 0.02);
+              actor.pendingCaptureReturn = true;
+              continue;
+            }
+          }
+
+          // New match reset or non-capture state sync: snap cleanly with no stale queue or sound
+          actor.stepQueue.length = 0;
+          actor.currentStep = null;
+          actor.isMoving = false;
+          actor.pendingCaptureReturn = false;
+          actor.captureDelaySec = 0;
+          actor.bounceT = 0;
+          const [gx, gz] = getTokenGridCoords(actor.color, actor.index, targetProg);
+          const [wx, wz] = gridToWorld(gx, gz);
+          actor.currentPos.set(wx, 0.024, wz);
+          actor.fromPos.copy(actor.currentPos);
+          actor.toPos.copy(actor.currentPos);
+        }
+      }
+
+      // Pass 3: Advance 160ms tile-by-tile arc hops, mid-hop scale(1.18), landing bounce, and Web Audio triggers
+      for (const actor of actors) {
+        const isActiveColor = active.includes(actor.color);
+        if (!isActiveColor) continue;
+
+        const targetProg = tokState[actor.color][actor.index];
         const [ox, oz, stackCount] = actorOffset.get(actor) || [0, 0, 0];
 
-        // Queue tile-by-tile hops whenever progress changes (authentic Ludo King step hopping!)
-        if (targetProg !== actor.lastProgress) {
-          actor.stepQueue.length = 0;
-          if (actor.lastProgress === -1 && targetProg === 0) {
-            actor.stepQueue.push(0);
-          } else if (targetProg === -1) {
-            actor.stepQueue.push(-1);
-          } else if (targetProg > actor.lastProgress && targetProg - actor.lastProgress <= 6) {
-            for (let s = actor.lastProgress + 1; s <= targetProg; s++) {
-              actor.stepQueue.push(s);
-            }
-          } else {
-            actor.stepQueue.push(targetProg);
+        // Wait until capturing attacker lands before launching captured victim back to home yard
+        if (actor.pendingCaptureReturn) {
+          actor.captureDelaySec -= delta;
+          if (actor.captureDelaySec <= 0) {
+            actor.pendingCaptureReturn = false;
+            actor.captureDelaySec = 0;
+            actor.stepQueue.push({
+              step: -1,
+              kind: 'captured',
+              duration: CAPTURE_RETURN_DURATION_SEC,
+            });
           }
-          actor.lastProgress = targetProg;
         }
 
-        // Advance step-by-step hop animation
+        // Launch the next sequential single-tile hop from the queue
         if (!actor.isMoving && actor.stepQueue.length > 0) {
           const nextStep = actor.stepQueue.shift()!;
           const isFinalStep = actor.stepQueue.length === 0;
-          const [gx, gz] = getTokenGridCoords(actor.color, actor.index, nextStep);
+          const [gx, gz] = getTokenGridCoords(actor.color, actor.index, nextStep.step);
           const [wx, wz] = gridToWorld(gx, gz);
           actor.fromPos.copy(actor.currentPos);
           actor.toPos.set(wx + (isFinalStep ? ox : 0), 0.024, wz + (isFinalStep ? oz : 0));
+          actor.currentStep = nextStep;
           actor.hopT = 0;
+          actor.bounceT = 0;
           actor.isMoving = true;
-          if (actor.stepQueue.length > 0) {
-            soundEngine.playTokenHop();
+
+          // Trigger crisp per-step sound effect on every single tile step or home-yard unlock
+          if (nextStep.kind === 'unlock') {
+            soundEngine.playLudoUnlock();
+          } else if (nextStep.kind === 'hop') {
+            soundEngine.playLudoStepHop();
           }
         }
 
         let hopY = 0;
-        if (actor.isMoving) {
-          const hopSpeed = actor.stepQueue.length > 0 ? 7.8 : 6.2;
-          actor.hopT = Math.min(1, actor.hopT + delta * hopSpeed);
+        let hopScaleX = 1.0;
+        let hopScaleY = 1.0;
+        let hopScaleZ = 1.0;
+
+        if (actor.isMoving && actor.currentStep) {
+          const stepDur = Math.max(0.06, actor.currentStep.duration);
+          actor.hopT = Math.min(1, actor.hopT + delta / stepDur);
           const ease = actor.hopT * actor.hopT * (3 - 2 * actor.hopT);
           actor.currentPos.lerpVectors(actor.fromPos, actor.toPos, ease);
-          hopY = Math.sin(actor.hopT * Math.PI) * 0.52;
+
+          const arc = Math.sin(actor.hopT * Math.PI);
+          const arcHeight =
+            actor.currentStep.kind === 'unlock'
+              ? 0.85
+              : actor.currentStep.kind === 'captured'
+                ? 0.98
+                : 0.68;
+          hopY = arc * arcHeight;
+
+          // Smooth scale(1.18) pop at mid-hop returning cleanly to scale(1) on landing
+          const s = 1.0 + arc * 0.18;
+          hopScaleX = s;
+          hopScaleY = s;
+          hopScaleZ = s;
+
           if (actor.hopT >= 1) {
+            const finishedStep = actor.currentStep;
             actor.currentPos.copy(actor.toPos);
             actor.isMoving = false;
+            actor.currentStep = null;
+            actor.bounceT = 1.0;
+
+            const isFinalLanding = actor.stepQueue.length === 0;
+            if (isFinalLanding) {
+              if (finishedStep.triggersCapture) {
+                soundEngine.playLudoCapture();
+              } else if (finishedStep.kind === 'hop') {
+                const landedHome = finishedStep.step === 57;
+                const landedSafeStar =
+                  finishedStep.step >= 0 &&
+                  finishedStep.step <= 51 &&
+                  SAFE_TRACK_INDICES.has((START_OFFSET[actor.color] + finishedStep.step) % 52);
+                if (landedHome || landedSafeStar) {
+                  soundEngine.playLudoSafeOrHome();
+                }
+              }
+            }
           }
-        } else {
+        } else if (!actor.pendingCaptureReturn) {
           const [gx, gz] = getTokenGridCoords(actor.color, actor.index, targetProg);
           const [wx, wz] = gridToWorld(gx, gz);
           actor.currentPos.x = THREE.MathUtils.damp(actor.currentPos.x, wx + ox, 14, delta);
           actor.currentPos.z = THREE.MathUtils.damp(actor.currentPos.z, wz + oz, 14, delta);
         }
 
-        const isSelectable = actor.color === turnColor && legal.includes(actor.index);
+        const isSelectable =
+          actor.color === turnColor &&
+          legal.includes(actor.index) &&
+          !actor.isMoving &&
+          actor.stepQueue.length === 0;
         actor.selectRing.visible = isSelectable;
         actor.group.position.set(actor.currentPos.x, 0.024, actor.currentPos.z);
 
-        if (isSelectable) {
+        if (actor.isMoving) {
+          actor.bodyGroup.position.y = hopY;
+          actor.bodyGroup.scale.set(hopScaleX, hopScaleY, hopScaleZ);
+        } else if (actor.bounceT > 0) {
+          // Subtle tactile landing bounce settling cleanly back to scale(1)
+          actor.bounceT = Math.max(0, actor.bounceT - delta / 0.13);
+          const baseScale = isSelectable ? 1.13 : stackCount > 0 ? 0.88 : 1.0;
+          const squash = Math.sin(actor.bounceT * Math.PI) * 0.11 * actor.bounceT;
+          const reboundY = Math.sin((1 - actor.bounceT) * Math.PI) * 0.06 * actor.bounceT;
+          actor.bodyGroup.position.y = reboundY;
+          actor.bodyGroup.scale.set(
+            baseScale * (1 + squash * 0.75),
+            baseScale * (1 - squash),
+            baseScale * (1 + squash * 0.75),
+          );
+        } else if (isSelectable) {
           actor.selectRing.rotation.z = -t * 2.6;
           const ringPulse = 1 + Math.sin(t * 6.5) * 0.08;
           actor.selectRing.scale.set(ringPulse, ringPulse, 1);
-          actor.bodyGroup.position.y = hopY + Math.abs(Math.sin(t * 5.8)) * 0.24;
+          actor.bodyGroup.position.y = Math.abs(Math.sin(t * 5.8)) * 0.24;
           actor.bodyGroup.scale.setScalar(1.13);
         } else {
-          actor.bodyGroup.position.y = hopY;
-          actor.bodyGroup.scale.setScalar(stackCount > 0 && !actor.isMoving ? 0.88 : 1.0);
+          actor.bodyGroup.position.y = 0;
+          actor.bodyGroup.scale.setScalar(stackCount > 0 ? 0.88 : 1.0);
         }
       }
 
@@ -1190,7 +1421,7 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
           BOARD_FRAME_EXTENT,
           viewMetrics.aspect,
           viewMetrics.fov,
-          0.975,
+          0.955,
           0.1,
         );
         targetCamPos.set(0, dist, dist * 0.1);
@@ -1255,10 +1486,10 @@ export const LudoCanvas: React.FC<LudoCanvasProps> = ({
   };
 
   return (
-    <div className="relative w-full h-full overflow-hidden">
+    <div className="relative w-full h-full aspect-square overflow-hidden">
       <div
         ref={containerRef}
-        className="w-full h-full overflow-hidden cursor-pointer select-none"
+        className="w-full h-full aspect-square overflow-hidden cursor-pointer select-none"
       />
       {activeReaction && (
         <div

@@ -98,7 +98,7 @@ export default function RewardsPage() {
       : '';
   const whatsappInviteHref = shareLink
     ? `https://wa.me/?text=${encodeURIComponent(
-        `Join me on Aurelia Arena (Ludo 3D, Dragon Tiger & Aviator)! Use my invite code ${myReferralCode} and start playing with 10,000 bonus virtual coins: ${shareLink}`,
+        `Join me on Aurelia Arena (Teen Patti, Ludo 3D, Dragon Tiger & Aviator)! Use my invite code ${myReferralCode}: ${shareLink}`,
       )}`
     : '#';
 
@@ -106,7 +106,7 @@ export default function RewardsPage() {
   const qualifiedCount = referrals.filter((r) => r.status === 'unlocked' || r.status === 'claimed').length;
   const totalReferralEarnings = referrals
     .filter((r) => r.status === 'claimed')
-    .reduce((sum, r) => sum + (r.rewardAmount || REFERRAL_REWARD_COINS), 0);
+    .reduce((sum, r) => sum + Math.min(r.rewardAmount || REFERRAL_REWARD_COINS, REFERRAL_REWARD_COINS), 0);
 
   const handleClaimDaily = async () => {
     if (!isAuthenticated) {
@@ -181,7 +181,7 @@ export default function RewardsPage() {
       const res = await applyReferralCode(firebaseUser.uid, profile.username, refInput);
       soundEngine.playCoinReward();
       pushToast(
-        `Linked to ${res.referrerUsername} (${res.code})! Complete your 1st game to unlock their bonus.`,
+        `Linked to ${res.referrerUsername} (${res.code})! Complete your first approved deposit to unlock their +${REFERRAL_REWARD_COINS} Bonus Coins reward.`,
         'emerald',
       );
       setRefInput('');
@@ -444,10 +444,10 @@ export default function RewardsPage() {
           <div className="space-y-2">
             <h2 className="font-display text-xl font-bold text-[#faf6ee] inline-flex items-center gap-2">
               <Users className="w-5 h-5 text-[#d4af37]" />
-              <span>Refer &amp; Earn +{REFERRAL_REWARD_COINS.toLocaleString()} Bonus</span>
+              <span>Refer &amp; Earn +{REFERRAL_REWARD_COINS.toLocaleString()} Bonus Coins</span>
             </h2>
             <p className="text-xs text-zinc-400 leading-relaxed">
-              Share your personal invite code. Your +{REFERRAL_REWARD_COINS.toLocaleString()} Bonus Coin reward unlocks automatically once your invited friend completes their first real game.
+              Share your personal invite code. Your +{REFERRAL_REWARD_COINS.toLocaleString()} Bonus Coins reward unlocks strictly after your invited friend signs up and completes their first approved deposit.
             </p>
           </div>
 
@@ -542,7 +542,7 @@ export default function RewardsPage() {
                 <div className="text-xs text-zinc-400">Your Invited Friends ({referrals.length})</div>
                 {referrals.length === 0 ? (
                   <div className="rounded-xl bg-black/30 border border-white/5 p-4 text-xs text-zinc-500 text-center">
-                    No referrals yet. Share your link to start unlocking +2,000 Bonus Coins per player!
+                    No referrals yet. Share your link to start unlocking +{REFERRAL_REWARD_COINS.toLocaleString()} Bonus Coins after each friend&apos;s first approved deposit!
                   </div>
                 ) : (
                   <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
@@ -555,9 +555,9 @@ export default function RewardsPage() {
                           <div className="font-semibold text-zinc-100 truncate">{r.referredUsername}</div>
                           <div className="text-[11px] text-zinc-500">
                             {r.status === 'pending'
-                              ? 'Locked until 1st game completed'
+                              ? 'Locked until 1st approved deposit'
                               : r.status === 'unlocked'
-                                ? '1st game verified — Ready to claim!'
+                                ? '1st deposit approved — Ready to claim!'
                                 : 'Reward claimed'}
                           </div>
                         </div>
@@ -568,7 +568,9 @@ export default function RewardsPage() {
                             onClick={() => void handleClaimReferral(r.referralId)}
                             className="gold-button px-3 py-1.5 rounded-lg text-[11px] font-bold shrink-0"
                           >
-                            {claimingRefId === r.referralId ? '...' : `+${r.rewardAmount}`}
+                            {claimingRefId === r.referralId
+                              ? '...'
+                              : `+${Math.min(r.rewardAmount, REFERRAL_REWARD_COINS)} Bonus`}
                           </button>
                         ) : r.status === 'claimed' ? (
                           <span className="inline-flex items-center gap-1 text-emerald-300 font-semibold shrink-0">

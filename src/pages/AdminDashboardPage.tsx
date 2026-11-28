@@ -1045,7 +1045,7 @@ export default function AdminDashboardPage() {
                     First-Time Signup Bonus (₹)
                   </label>
                   <div className="flex items-center gap-1.5">
-                    {[0, 51, 100].map((preset) => (
+                    {[0, 51, 100, 250].map((preset) => (
                       <button
                         key={preset}
                         type="button"
@@ -1053,6 +1053,7 @@ export default function AdminDashboardPage() {
                           setLiquidityDraft((prev) => ({
                             ...prev,
                             welcomeBonusAmount: preset,
+                            signupBonus: preset,
                           }))
                         }
                         className={`px-2.5 py-1 rounded-lg font-mono-num text-[11px] font-bold border transition-colors ${
@@ -1072,16 +1073,18 @@ export default function AdminDashboardPage() {
                   max={500}
                   step={1}
                   value={liquidityDraft.welcomeBonusAmount}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const nextVal = Math.max(0, Math.min(500, Math.round(Number(e.target.value) || 0)));
                     setLiquidityDraft((prev) => ({
                       ...prev,
-                      welcomeBonusAmount: Math.max(0, Math.min(500, Math.round(Number(e.target.value) || 0))),
-                    }))
-                  }
+                      welcomeBonusAmount: nextVal,
+                      signupBonus: nextVal,
+                    }));
+                  }}
                   className="w-full bg-black/55 border border-white/15 rounded-xl px-3 py-2.5 font-mono-num text-sm text-white focus:outline-none focus:border-[#d4af37]"
                 />
                 <p className="text-[11px] text-zinc-500">
-                  Credited once strictly to Bonus Wallet on first sign-in (₹0 disables signup bonus; range ₹0 – ₹500).
+                  Credited once strictly to Bonus Wallet on first sign-up via Phone, Email, or Google (₹0 disables signup bonus; range ₹0 – ₹500).
                 </p>
               </div>
 

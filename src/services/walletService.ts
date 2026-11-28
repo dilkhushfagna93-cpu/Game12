@@ -40,7 +40,7 @@ import {
 
 export const UPI_WITHDRAWAL_COOLDOWN_MS = 5 * 60 * 1000;
 export const UPI_DAILY_WITHDRAWAL_LIMIT = 50000;
-export const REFERRAL_REWARD_COINS = 2000;
+export const REFERRAL_REWARD_COINS = 50;
 export const DEFAULT_WELCOME_BONUS = 51;
 export const MAX_BONUS_CONTRIBUTION_RATIO = 0.2;
 export const STARTER_BONUS_ONLY_MAX_STAKE = 10;
@@ -324,7 +324,7 @@ export const DAILY_MISSIONS: DailyMissionDef[] = [
     title: 'Play One Ludo Match',
     description: 'Complete at least 1 match on the 3D Ludo tabletop.',
     cadence: 'daily',
-    reward: 1000,
+    reward: 5,
     badgeId: 'ludo_pioneer',
     checkCompleted: (s) => s.ludoPlayed >= 1,
   },
@@ -333,7 +333,7 @@ export const DAILY_MISSIONS: DailyMissionDef[] = [
     title: 'Complete Three Games',
     description: 'Finish 3 rounds across Dragon Tiger, Ludo, or Aviator.',
     cadence: 'daily',
-    reward: 1500,
+    reward: 10,
     badgeId: 'arena_regular',
     checkCompleted: (s) => s.gamesPlayed >= 3,
   },
@@ -342,7 +342,7 @@ export const DAILY_MISSIONS: DailyMissionDef[] = [
     title: 'Claim a Victory',
     description: 'Win at least 1 round or cash out profitably in Aviator.',
     cadence: 'daily',
-    reward: 1200,
+    reward: 10,
     badgeId: 'first_victory',
     checkCompleted: (s) => s.wins >= 1,
   },
@@ -351,7 +351,7 @@ export const DAILY_MISSIONS: DailyMissionDef[] = [
     title: '3-Day Consecutive Login',
     description: 'Claim your daily check-in reward for 3 consecutive days.',
     cadence: 'weekly',
-    reward: 3500,
+    reward: 25,
     badgeId: 'loyal_strategist',
     checkCompleted: (s) => s.streakDays >= 3,
   },
@@ -360,7 +360,7 @@ export const DAILY_MISSIONS: DailyMissionDef[] = [
     title: 'Ten Rounds Veteran',
     description: 'Complete 10 total rounds across Aurelia Arena.',
     cadence: 'weekly',
-    reward: 4000,
+    reward: 40,
     badgeId: 'grand_veteran',
     checkCompleted: (s) => s.gamesPlayed >= 10,
   },
@@ -455,8 +455,65 @@ export async function ensureUserProvisioned(params: {
       };
     }
 
-    // Initialize new users with 0 deposited balance and 0 free starting coins to prevent bonus abuse
-    const welcomeBonus = 0;
+    // Read live admin-configured First-Time Signup Bonus from Firestore settings/platform
+    let configuredSignupBonus = 51;
+    try {
+      const settingsSnap = await getDoc(doc(db, 'settings', 'platform'));
+      if (settingsSnap.exists()) {
+        const sData = settingsSnap.data() as { signupBonus?: unknown; welcomeBonusAmount?: unknown };
+        const rawVal = sData.signupBonus ?? sData.welcomeBonusAmount;
+        const parsed = Math.round(Number(rawVal));
+        if (Number.isFinite(parsed)) {
+          configuredSignupBonus = Math.max(0, Math.min(500, parsed));
+        }
+      }
+    } catch {
+      // Fall back to default 51 (matches firestore.rules expectedWelcomeBonus())
+    }
+
+    const computeOpaqueHash = async (raw: string): Promise<string> => {
+      const normalized = raw.trim().toLowerCase();
+      try {
+        if (typeof crypto !== 'undefined' && crypto.subtle) {
+          const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalized));
+          return Array.from(new Uint8Array(buf))
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join('')
+            .slice(0, 48);
+        }
+      } catch {
+        // Fallback deterministic hex hash
+      }
+      let h = 2166136261;
+      for (let i = 0; i < normalized.length; i++) {
+        h ^= normalized.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return (h >>> 0).toString(16).padStart(8, '0');
+    };
+
+    const normalizedEmail = (params.email || '').trim().toLowerCase();
+    const uidClaimId = `uid_${params.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 96)}`;
+    const emailClaimId = normalizedEmail ? `email_${await computeOpaqueHash(normalizedEmail)}` : '';
+
+    // Check one-time signup bonus claim locks (uid + email) so returning/recreated accounts never double-claim
+    let alreadyClaimed = false;
+    if (configuredSignupBonus > 0 && !pubSnap.exists()) {
+      try {
+        const checks = [getDoc(doc(db, 'signupBonusClaims', uidClaimId))];
+        if (emailClaimId) {
+          checks.push(getDoc(doc(db, 'signupBonusClaims', emailClaimId)));
+        }
+        const claimSnaps = await Promise.all(checks);
+        if (claimSnaps.some((s) => s.exists())) {
+          alreadyClaimed = true;
+        }
+      } catch {
+        // Ignore non-fatal lookup error; publicProfiles existence still prevents repeat claims
+      }
+    }
+
+    const welcomeBonus = alreadyClaimed ? 0 : configuredSignupBonus;
 
     const username = sanitizeUsername(params.displayName || params.email.split('@')[0] || 'Player');
     const avatarSeed = username.slice(0, 16);
@@ -491,6 +548,7 @@ export async function ensureUserProvisioned(params: {
       username,
       role: isRootAdmin ? 'admin' : 'player',
       welcomeBonusClaimed: true,
+      signupBonusClaimed: true,
       lastDailyClaimDate: '',
       lastSpinDate: '',
       streakDays: 0,
@@ -525,10 +583,33 @@ export async function ensureUserProvisioned(params: {
           amount: welcomeBonus,
           balanceBefore: 0,
           balanceAfter: welcomeBonus,
-          description: `Welcome Signup Bonus: ₹${welcomeBonus} credited to Bonus Wallet`,
+          description: 'Welcome Signup Bonus',
           roundId: 'welcome_bonus',
           createdAt: serverTimestamp(),
         });
+
+        // Record immutable claim locks for uid & hashed email (best-effort)
+        const lockWrites: Promise<unknown>[] = [
+          setDoc(doc(db, 'signupBonusClaims', uidClaimId), {
+            claimId: uidClaimId,
+            uid: params.uid,
+            claimType: 'uid',
+            amount: welcomeBonus,
+            createdAt: serverTimestamp(),
+          }).catch(() => {}),
+        ];
+        if (emailClaimId) {
+          lockWrites.push(
+            setDoc(doc(db, 'signupBonusClaims', emailClaimId), {
+              claimId: emailClaimId,
+              uid: params.uid,
+              claimType: 'email',
+              amount: welcomeBonus,
+              createdAt: serverTimestamp(),
+            }).catch(() => {}),
+          );
+        }
+        await Promise.all(lockWrites);
       }
     }
 
@@ -683,7 +764,6 @@ export async function settleAtomicGameRound(params: {
 
   const pubRef = doc(db, 'publicProfiles', params.uid);
   const privRef = doc(db, 'users', params.uid);
-  const referralRef = doc(db, 'referrals', `ref_${params.uid}`);
   const historyId = makeSafeId('hist');
   const historyRef = doc(db, 'gameHistory', historyId);
 
@@ -694,8 +774,6 @@ export async function settleAtomicGameRound(params: {
       if (!pubSnap.exists()) throw new Error('Player profile not found');
 
       const priv = privSnap.exists() ? (privSnap.data() as UserPrivate) : null;
-      const shouldCheckReferral = Boolean(priv && priv.referredBy && !priv.referralRewardUnlocked);
-      const refSnap = shouldCheckReferral ? await tx.get(referralRef) : null;
 
       const data = pubSnap.data() as PublicProfile;
       const buckets = extractWalletBuckets(data);
@@ -786,21 +864,6 @@ export async function settleAtomicGameRound(params: {
         isPublic: true,
         createdAt: serverTimestamp(),
       });
-
-      // Unlock pending referral reward strictly upon completing first real game
-      if (priv && refSnap && refSnap.exists()) {
-        const refData = refSnap.data() as ReferralRecord;
-        if (priv.referredBy && !priv.referralRewardUnlocked && refData.status === 'pending') {
-          tx.update(privRef, {
-            referralRewardUnlocked: true,
-            updatedAt: serverTimestamp(),
-          });
-          tx.update(referralRef, {
-            status: 'unlocked',
-            updatedAt: serverTimestamp(),
-          });
-        }
-      }
 
       return balanceAfter;
     });
@@ -973,13 +1036,18 @@ export async function claimMissionReward(
         throw new Error('Mission reward already claimed');
       }
 
+      const canonicalMission = DAILY_MISSIONS.find((m) => m.id === mission.id);
+      const cappedReward = canonicalMission
+        ? canonicalMission.reward
+        : Math.max(0, Math.min(40, Math.round(mission.reward)));
+
       const buckets = extractWalletBuckets(pub);
       const nextClaimed = [...priv.claimedMissions, mission.id].slice(0, 40);
       const nextBadges =
         mission.badgeId && !pub.badges.includes(mission.badgeId)
           ? [...pub.badges, mission.badgeId].slice(0, 20)
           : pub.badges;
-      const granted = Math.min(mission.reward, Math.max(0, 100000000 - buckets.totalBalance));
+      const granted = Math.min(cappedReward, Math.max(0, 100000000 - buckets.totalBalance));
       const nextBonus = buckets.bonusBalance + granted;
       const nextBalance = buckets.depositBalance + buckets.winningBalance + nextBonus;
       const txId = makeSafeId('tx_mission');
@@ -1152,14 +1220,17 @@ export async function claimUnlockedReferralReward(
 
       if (refData.referrerUid !== uid) throw new Error('Not authorized to claim this referral');
       if (refData.status === 'pending') {
-        throw new Error('Referral reward unlocks automatically after your friend finishes their first game.');
+        throw new Error('Referral reward unlocks automatically after your friend completes their first approved deposit.');
       }
       if (refData.status === 'claimed') {
         throw new Error('Referral reward already claimed.');
       }
 
       const buckets = extractWalletBuckets(pub);
-      const granted = Math.min(refData.rewardAmount, Math.max(0, 100000000 - buckets.totalBalance));
+      const granted = Math.min(
+        Math.min(refData.rewardAmount, REFERRAL_REWARD_COINS),
+        Math.max(0, 100000000 - buckets.totalBalance),
+      );
       const nextBonus = buckets.bonusBalance + granted;
       const nextBalance = buckets.depositBalance + buckets.winningBalance + nextBonus;
       const txId = makeSafeId('tx_ref');

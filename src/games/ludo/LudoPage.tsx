@@ -496,6 +496,7 @@ export default function LudoPage() {
   const [diceValue, setDiceValue] = useState(1);
   const [diceRolled, setDiceRolled] = useState(false);
   const [diceRolling, setDiceRolling] = useState(false);
+  const [tokenAnimating, setTokenAnimating] = useState(false);
   const [consecutiveSixes, setConsecutiveSixes] = useState(0);
   const [missedTurns, setMissedTurns] = useState<Record<LudoColor, number>>(INITIAL_MISSED);
   const [forfeitedColors, setForfeitedColors] = useState<LudoColor[]>([]);
@@ -512,6 +513,44 @@ export default function LudoPage() {
   const deductedRoomIdRef = useRef<string>('');
   const settledRoomIdRef = useRef<string>('');
   const guestMatchTimerRef = useRef<number | null>(null);
+  const moveAnimTimersRef = useRef<number[]>([]);
+
+  const clearMoveAnimTimers = useCallback(() => {
+    moveAnimTimersRef.current.forEach((id) => window.clearTimeout(id));
+    moveAnimTimersRef.current = [];
+  }, []);
+
+  const scheduleMoveAnimTimer = useCallback((fn: () => void, delayMs: number) => {
+    const id = window.setTimeout(() => {
+      moveAnimTimersRef.current = moveAnimTimersRef.current.filter((t) => t !== id);
+      fn();
+    }, delayMs);
+    moveAnimTimersRef.current.push(id);
+    return id;
+  }, []);
+
+  const estimateMoveAnimMs = useCallback(
+    (prevTokens: Record<LudoColor, number[]>, nextTokens: Record<LudoColor, number[]>, color: LudoColor): number => {
+      const prevArr = prevTokens[color] || [];
+      const nextArr = nextTokens[color] || [];
+      let maxMs = 0;
+      for (let i = 0; i < 4; i++) {
+        const p0 = prevArr[i] ?? -1;
+        const p1 = nextArr[i] ?? -1;
+        if (p1 > p0) {
+          if (p0 === -1 && p1 === 0) {
+            maxMs = Math.max(maxMs, 320);
+          } else if (p0 === -1) {
+            maxMs = Math.max(maxMs, 320 + p1 * 270);
+          } else {
+            maxMs = Math.max(maxMs, (p1 - p0) * 270);
+          }
+        }
+      }
+      return maxMs > 0 ? maxMs + 180 : 0;
+    },
+    [],
+  );
 
   // Online Multiplayer State
   const [onlineRoom, setOnlineRoom] = useState<LudoRoom | null>(null);
@@ -829,8 +868,9 @@ export default function LudoPage() {
       if (guestMatchTimerRef.current !== null) {
         window.clearTimeout(guestMatchTimerRef.current);
       }
+      clearMoveAnimTimers();
     };
-  }, []);
+  }, [clearMoveAnimTimers]);
 
   const getNextActiveLocalTurnIndex = useCallback(
     (fromIdx: number, forfeited: LudoColor[]): number => {
@@ -1009,8 +1049,9 @@ export default function LudoPage() {
 
   const executeTokenMove = useCallback(
     async (color: LudoColor, tokenIndex: number, rolledValue: number) => {
+      soundEngine.unlock();
       if (onlineRoom) {
-        if (!isMyTurnOnline || !onlineRoom.diceRolled) return;
+        if (!isMyTurnOnline || !onlineRoom.diceRolled || tokenAnimating) return;
         const resp = await fetch('/api/games/ludo/validate-move', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1028,8 +1069,11 @@ export default function LudoPage() {
           return;
         }
         const validated = await resp.json();
-        if (validated.captured) soundEngine.playTokenCapture();
-        else soundEngine.playTokenHop();
+        const animMs = estimateMoveAnimMs(onlineRoom.tokens, validated.nextTokens, color);
+        if (animMs > 0) {
+          setTokenAnimating(true);
+          scheduleMoveAnimTimer(() => setTokenAnimating(false), animMs);
+        }
 
         const nextMissed: Record<LudoColor, number> = {
           ...(onlineRoom.missedTurns || INITIAL_MISSED()),
@@ -1074,63 +1118,74 @@ export default function LudoPage() {
         });
 
         if (validated.allFinished) {
-          soundEngine.playWinFanfare();
+          scheduleMoveAnimTimer(() => soundEngine.playWinFanfare(), Math.max(0, animMs - 40));
         }
         return;
       }
 
       // Guest Online Table Move
+      if (tokenAnimating) return;
       const res = applyLocalLudoMove(tokens, color, tokenIndex, rolledValue, activeTokensToWin);
+      const animMs = estimateMoveAnimMs(tokens, res.nextTokens, color);
       setTokens(res.nextTokens);
       setDiceRolled(false);
       setMissedTurns((prev) => ({ ...prev, [color]: 0 }));
       setTurnSecondsLeft(TURN_TIMEOUT_SEC);
+      setTokenAnimating(true);
 
-      if (res.captured) soundEngine.playTokenCapture();
-      else soundEngine.playTokenHop();
+      const finishLocalMove = () => {
+        setTokenAnimating(false);
 
-      if (res.allFinished) {
-        setWinnerColor(color);
-        soundEngine.playWinFanfare();
-        const playerWon = color === humanColor;
-        const prize = playerWon ? calculateLudoPrize(entryStake, playerCount) : 0;
-        setStatusLog(
-          `${CORNER_THEME[color].name} finished ${activeTokensToWin === 1 ? '1 token (Quick Mode)' : 'all 4 tokens'} and won ₹${calculateLudoPrize(entryStake, playerCount).toLocaleString()}!`,
-        );
+        if (res.allFinished) {
+          setWinnerColor(color);
+          soundEngine.playWinFanfare();
+          const playerWon = color === humanColor;
+          const prize = playerWon ? calculateLudoPrize(entryStake, playerCount) : 0;
+          setStatusLog(
+            `${CORNER_THEME[color].name} finished ${activeTokensToWin === 1 ? '1 token (Quick Mode)' : 'all 4 tokens'} and won ₹${calculateLudoPrize(entryStake, playerCount).toLocaleString()}!`,
+          );
 
-        void settleRound({
-          game: 'ludo',
-          betAmount: entryStake,
-          payout: prize,
-          outcome: playerWon ? 'win' : 'loss',
-          summary: playerWon
-            ? `Won ${playerCount}P Ludo 3D ₹${entryStake} table (+₹${prize.toLocaleString()})`
-            : `Opponent won ${playerCount}P Ludo 3D ₹${entryStake} table`,
-          roundId: matchRoundIdRef.current || `ludo_${Date.now()}`,
-          seedHash: lastDiceAudit?.serverSeedHash || `ludo_tbl_${playerCount}p`,
-        }).catch(() => {});
-        return;
-      }
+          void settleRound({
+            game: 'ludo',
+            betAmount: entryStake,
+            payout: prize,
+            outcome: playerWon ? 'win' : 'loss',
+            summary: playerWon
+              ? `Won ${playerCount}P Ludo 3D ₹${entryStake} table (+₹${prize.toLocaleString()})`
+              : `Opponent won ${playerCount}P Ludo 3D ₹${entryStake} table`,
+            roundId: matchRoundIdRef.current || `ludo_${Date.now()}`,
+            seedHash: lastDiceAudit?.serverSeedHash || `ludo_tbl_${playerCount}p`,
+          }).catch(() => {});
+          return;
+        }
 
-      if (res.bonusTurn) {
-        setStatusLog(
-          res.captured
-            ? `${CORNER_THEME[color].name} cut ${CORNER_THEME[res.captured.color].name}! Bonus roll!`
-            : res.finishedNow
-              ? `${CORNER_THEME[color].name} reached Home! Bonus roll!`
-              : `${CORNER_THEME[color].name} rolled 6 — Bonus roll!`,
-        );
+        if (res.bonusTurn) {
+          setStatusLog(
+            res.captured
+              ? `${CORNER_THEME[color].name} cut ${CORNER_THEME[res.captured.color].name}! Bonus roll!`
+              : res.finishedNow
+                ? `${CORNER_THEME[color].name} reached Home! Bonus roll!`
+                : `${CORNER_THEME[color].name} rolled 6 — Bonus roll!`,
+          );
+        } else {
+          setConsecutiveSixes(0);
+          const nextIdx = getNextActiveLocalTurnIndex(turnIndex, forfeitedColors);
+          setTurnIndex(nextIdx);
+          setStatusLog(`${CORNER_THEME[activeColors[nextIdx]].name}'s turn to roll.`);
+        }
+      };
+
+      if (animMs > 0) {
+        scheduleMoveAnimTimer(finishLocalMove, animMs);
       } else {
-        setConsecutiveSixes(0);
-        const nextIdx = getNextActiveLocalTurnIndex(turnIndex, forfeitedColors);
-        setTurnIndex(nextIdx);
-        setStatusLog(`${CORNER_THEME[activeColors[nextIdx]].name}'s turn to roll.`);
+        finishLocalMove();
       }
     },
     [
       activeColors,
       activeTokensToWin,
       entryStake,
+      estimateMoveAnimMs,
       firebaseUser?.uid,
       forfeitedColors,
       getNextActiveLocalTurnIndex,
@@ -1141,7 +1196,9 @@ export default function LudoPage() {
       onlineRoom,
       playerCount,
       pushToast,
+      scheduleMoveAnimTimer,
       settleRound,
+      tokenAnimating,
       tokens,
       turnIndex,
     ],
@@ -1149,7 +1206,7 @@ export default function LudoPage() {
 
   // Ludo King Signature Auto-Move: if human rolled and only 1 distinct legal choice exists, auto-move smoothly!
   useEffect(() => {
-    if (!currentDiceRolled || diceRolling || legalIndices.length === 0) return;
+    if (!currentDiceRolled || diceRolling || tokenAnimating || legalIndices.length === 0) return;
     const activeTokenPositions = legalIndices.map((idx) => displayedTokens[currentTurnColor][idx]);
     const allSamePos = activeTokenPositions.every((p) => p === activeTokenPositions[0]);
     if (legalIndices.length === 1 || allSamePos) {
@@ -1167,6 +1224,7 @@ export default function LudoPage() {
     displayedTokens,
     executeTokenMove,
     legalIndices,
+    tokenAnimating,
   ]);
 
   // Server-Side Auto-Move Handler (15s timeout & smart bots)
@@ -1216,6 +1274,7 @@ export default function LudoPage() {
           }
 
           setDiceRolling(true);
+          const botRollStartedAt = Date.now();
           soundEngine.playDiceRoll();
           const resp = await fetch('/api/games/ludo/auto-move', {
             method: 'POST',
@@ -1232,6 +1291,10 @@ export default function LudoPage() {
           setDiceRolling(false);
           if (!resp.ok) return;
           const autoData = (await resp.json()) as AutoMoveServerResponse;
+          if (autoData.dice === 6 && !autoData.threeSixes) {
+            const accentDelaySec = Math.max(0, (415 - (Date.now() - botRollStartedAt)) / 1000);
+            soundEngine.playDiceSixAccent(accentDelaySec);
+          }
           if (autoData.serverSeedHash) {
             setLastDiceAudit({
               dice: autoData.dice,
@@ -1241,8 +1304,14 @@ export default function LudoPage() {
             });
           }
 
-          if (autoData.captured) soundEngine.playTokenCapture();
-          else if (!autoData.noLegalMoves) soundEngine.playTokenHop();
+          const animMs =
+            autoData.noLegalMoves || autoData.threeSixes
+              ? 0
+              : estimateMoveAnimMs(onlineRoom.tokens, autoData.nextTokens, actor.color);
+          if (animMs > 0) {
+            setTokenAnimating(true);
+            scheduleMoveAnimTimer(() => setTokenAnimating(false), animMs);
+          }
 
           const nextMissed = { ...currentMissedMap, [actor.color]: nextMissCount };
           const nextPlayers = onlineRoom.players.map((p) =>
@@ -1320,6 +1389,7 @@ export default function LudoPage() {
         }
 
         setDiceRolling(true);
+        const guestBotRollStartedAt = Date.now();
         soundEngine.playDiceRoll();
         const resp = await fetch('/api/games/ludo/auto-move', {
           method: 'POST',
@@ -1336,6 +1406,10 @@ export default function LudoPage() {
         setDiceRolling(false);
         if (!resp.ok) return;
         const autoData = (await resp.json()) as AutoMoveServerResponse;
+        if (autoData.dice === 6 && !autoData.threeSixes) {
+          const accentDelaySec = Math.max(0, (415 - (Date.now() - guestBotRollStartedAt)) / 1000);
+          soundEngine.playDiceSixAccent(accentDelaySec);
+        }
         if (autoData.serverSeedHash) {
           setLastDiceAudit({
             dice: autoData.dice,
@@ -1356,10 +1430,21 @@ export default function LudoPage() {
           );
         }
 
-        if (autoData.captured) soundEngine.playTokenCapture();
-        else if (!autoData.noLegalMoves) soundEngine.playTokenHop();
-
+        const animMs =
+          autoData.noLegalMoves || autoData.threeSixes
+            ? 0
+            : estimateMoveAnimMs(tokens, autoData.nextTokens, color);
         setTokens(autoData.nextTokens);
+
+        if (animMs > 0) {
+          setTokenAnimating(true);
+          await new Promise<void>((resolve) => {
+            scheduleMoveAnimTimer(() => {
+              setTokenAnimating(false);
+              resolve();
+            }, animMs);
+          });
+        }
 
         if (autoData.allFinished) {
           setWinnerColor(color);
@@ -1407,6 +1492,7 @@ export default function LudoPage() {
       diceRolled,
       diceValue,
       entryStake,
+      estimateMoveAnimMs,
       forfeitedColors,
       getNextActiveLocalTurnIndex,
       getNextActiveOnlineTurnIndex,
@@ -1416,6 +1502,7 @@ export default function LudoPage() {
       onlineRoom,
       playerCount,
       pushToast,
+      scheduleMoveAnimTimer,
       settleRound,
       tokens,
       turnIndex,
@@ -1425,7 +1512,7 @@ export default function LudoPage() {
 
   // 15-Second Turn Countdown Timer
   useEffect(() => {
-    if (!isMatchActive || diceRolling) return;
+    if (!isMatchActive || diceRolling || tokenAnimating) return;
 
     if (onlineRoom) {
       const turnStart = onlineRoom.turnStartedAtMs || Date.now();
@@ -1467,12 +1554,13 @@ export default function LudoPage() {
     isMatchActive,
     isMyTurnOnline,
     onlineRoom,
+    tokenAnimating,
     turnSecondsLeft,
   ]);
 
   // Trigger Online Matched Opponent Turn (natural 1.5s–4.5s human reaction delay)
   useEffect(() => {
-    if (!isOnlineBotTurn || diceRolling) return;
+    if (!isOnlineBotTurn || diceRolling || tokenAnimating) return;
     const delay = getNaturalReactionDelayMs();
     const t = window.setTimeout(() => {
       void executeServerAutoMove('bot');
@@ -1484,20 +1572,22 @@ export default function LudoPage() {
     isOnlineBotTurn,
     onlineRoom?.currentTurnIndex,
     onlineRoom?.turnStartedAtMs,
+    tokenAnimating,
   ]);
 
   // Trigger Guest Matched Opponent Turn (natural 1.5s–4.5s human reaction delay)
   useEffect(() => {
-    if (!isAiTurn || diceRolling || winnerColor) return;
+    if (!isAiTurn || diceRolling || tokenAnimating || winnerColor) return;
     const delay = getNaturalReactionDelayMs();
     const t = window.setTimeout(() => {
       void executeServerAutoMove('bot');
     }, delay);
     return () => window.clearTimeout(t);
-  }, [diceRolling, executeServerAutoMove, isAiTurn, turnIndex, tokens, winnerColor]);
+  }, [diceRolling, executeServerAutoMove, isAiTurn, tokenAnimating, turnIndex, tokens, winnerColor]);
 
   const handleRollDice = useCallback(async () => {
-    if (diceRolling) return;
+    if (diceRolling || tokenAnimating) return;
+    soundEngine.unlock();
     if (onlineRoom) {
       if (!isMyTurnOnline || onlineRoom.diceRolled) return;
       soundEngine.playDiceRoll();
@@ -1511,6 +1601,9 @@ export default function LudoPage() {
 
       window.setTimeout(async () => {
         setDiceRolling(false);
+        if (rolled === 6) {
+          soundEngine.playDiceSixAccent();
+        }
         const nextMissed = { ...(onlineRoom.missedTurns || INITIAL_MISSED()), [currentTurnColor]: 0 };
         const nextSixes = rolled === 6 ? onlineRoom.consecutiveSixes + 1 : 0;
         if (nextSixes >= 3) {
@@ -1565,6 +1658,9 @@ export default function LudoPage() {
     window.setTimeout(() => {
       setDiceRolling(false);
       setDiceValue(rolled);
+      if (rolled === 6) {
+        soundEngine.playDiceSixAccent();
+      }
       setMissedTurns((prev) => ({ ...prev, [currentTurnColor]: 0 }));
       setTurnSecondsLeft(TURN_TIMEOUT_SEC);
 
@@ -1604,12 +1700,15 @@ export default function LudoPage() {
     isMyTurnOnline,
     matchStarted,
     onlineRoom,
+    tokenAnimating,
     tokens,
     turnIndex,
     winnerColor,
   ]);
 
   const handleBoardTokenClick = (color: LudoColor, tokenIndex: number) => {
+    soundEngine.unlock();
+    if (tokenAnimating) return;
     if (color !== currentTurnColor) return;
     if (!legalIndices.includes(tokenIndex)) return;
     void executeTokenMove(color, tokenIndex, currentDiceValue);
@@ -1710,7 +1809,7 @@ export default function LudoPage() {
       const isForfeit = Boolean(p?.forfeited);
       const isBot = Boolean(p?.isBot);
       const missedCount = onlineRoom.missedTurns?.[color] || p?.missedTurns || 0;
-      const canRoll = isTurn && isMyTurnOnline && !onlineRoom.diceRolled && !diceRolling;
+      const canRoll = isTurn && isMyTurnOnline && !onlineRoom.diceRolled && !diceRolling && !tokenAnimating;
       return {
         isSeatActive: Boolean(p),
         playerName: p?.name || CORNER_THEME[color].name,
@@ -1731,7 +1830,7 @@ export default function LudoPage() {
         : MATCHED_OPPONENT_NAMES[seatIdx % MATCHED_OPPONENT_NAMES.length];
     const isForfeit = forfeitedColors.includes(color);
     const missedCount = missedTurns[color] || 0;
-    const canRoll = isTurn && !isBot && !diceRolled && !diceRolling;
+    const canRoll = isTurn && !isBot && !diceRolled && !diceRolling && !tokenAnimating;
 
     return {
       isSeatActive,
@@ -1938,7 +2037,7 @@ export default function LudoPage() {
           className="relative flex-1 min-h-0 w-full flex items-center justify-center"
         >
           <div
-            className="relative rounded-xl overflow-hidden shadow-[0_14px_44px_rgba(12,18,58,0.65)] ring-[3px] ring-[#ffd600]"
+            className="relative aspect-square shrink-0 max-w-full max-h-full rounded-xl overflow-hidden shadow-[0_14px_44px_rgba(12,18,58,0.65)] ring-[3px] ring-[#ffd600]"
             style={{ width: `${boardPx}px`, height: `${boardPx}px` }}
           >
             <LudoCanvas
@@ -1953,25 +2052,6 @@ export default function LudoPage() {
               activeReaction={activeReaction}
               onTokenClick={handleBoardTokenClick}
             />
-
-            {/* Floating Quick Token Selector when 2+ distinct tokens are movable */}
-            {legalIndices.length > 1 && (
-              <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-[#08205a]/95 border-2 border-[#ffe033] shadow-xl">
-                <span className="text-[10px] font-extrabold text-[#ffe033] whitespace-nowrap">
-                  Tap Token:
-                </span>
-                {legalIndices.map((idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => void executeTokenMove(currentTurnColor, idx, currentDiceValue)}
-                    className="px-2 py-0.5 rounded-lg bg-[#ffe033] hover:bg-[#fff066] text-[#1c1002] text-[11px] font-black whitespace-nowrap"
-                  >
-                    #{idx + 1}
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
         </div>
 

@@ -39,6 +39,7 @@
         "username": { "type": "string", "minLength": 2, "maxLength": 32 },
         "role": { "type": "string", "enum": ["admin", "player"] },
         "welcomeBonusClaimed": { "type": "boolean" },
+        "signupBonusClaimed": { "type": "boolean" },
         "lastDailyClaimDate": { "type": "string", "maxLength": 16 },
         "lastSpinDate": { "type": "string", "maxLength": 16 },
         "streakDays": { "type": "number" },
@@ -343,10 +344,24 @@
         "smartMatchmakingEnabled": { "type": "boolean" },
         "matchmakingWaitSeconds": { "type": "number" },
         "welcomeBonusAmount": { "type": "number" },
+        "signupBonus": { "type": "number" },
         "requireFirstDepositToWithdraw": { "type": "boolean" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["liquidityMode", "maxRoundPayoutCap", "smartMatchmakingEnabled", "matchmakingWaitSeconds", "updatedAt"]
+    },
+    "SignupBonusClaim": {
+      "title": "SignupBonusClaim",
+      "description": "Immutable one-time signup bonus claim lock keyed by uid or hashed email/phone identifier.",
+      "type": "object",
+      "properties": {
+        "claimId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "claimType": { "type": "string", "enum": ["uid", "email", "phone"] },
+        "amount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["claimId", "uid", "claimType", "amount", "createdAt"]
     }
   },
   "firestore": {
@@ -416,7 +431,11 @@
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/PlatformLiquiditySettings" },
-      "description": "Unified 4-tier platform liquidity, payout cap, and smart matchmaking controls (settings/platform)."
+      "description": "Unified 4-tier platform liquidity, payout cap, signup bonus, and smart matchmaking controls (settings/platform)."
+    },
+    "/signupBonusClaims/{claimId}": {
+      "schema": { "$ref": "#/entities/SignupBonusClaim" },
+      "description": "Immutable one-time signup bonus claim locks preventing duplicate claims per uid, email, or phone."
     }
   }
 }

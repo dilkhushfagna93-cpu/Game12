@@ -1,14 +1,14 @@
 {
   "id": "/",
-  "name": "Aurelia Arena – 3D Multi-Game Platform",
-  "short_name": "Aurelia3D",
-  "description": "Ultra-realistic 3D Dragon Tiger, Ludo Tabletop, and Aviator Ascent with provably fair server RNG and atomic wallet.",
+  "name": "Aurelia Arena — Royal 3D Gaming Club",
+  "short_name": "Aurelia Arena",
+  "description": "Play ultra-realistic 3D Teen Patti, Ludo, Dragon Tiger, and Aviator in full-screen standalone mode.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
-  "theme_color": "#07060b",
-  "background_color": "#07060b",
+  "background_color": "#0B0B10",
+  "theme_color": "#0B0B10",
   "categories": ["games", "entertainment"],
   "icons": [
     {
@@ -28,6 +28,12 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
     }
   ]
 }

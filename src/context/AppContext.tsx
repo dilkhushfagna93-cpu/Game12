@@ -188,6 +188,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     androidCompat: 'Android 9.0 (Pie) or higher · ARM64 / ARMv7',
   });
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
+  const announcedSignupBonusUidRef = useRef<string | null>(null);
 
   const pushToast = useCallback((message: string, tone: ToastNotice['tone'] = 'gold') => {
     const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -196,6 +197,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4200);
   }, []);
+
+  const announceSignupBonus = useCallback(
+    (uid: string, amount: number): boolean => {
+      if (amount > 0 && announcedSignupBonusUidRef.current !== uid) {
+        announcedSignupBonusUidRef.current = uid;
+        soundEngine.playCoinReward();
+        pushToast(`Welcome! +₹${amount} Signup Bonus added to your Bonus Wallet`, 'gold');
+        return true;
+      }
+      return false;
+    },
+    [pushToast],
+  );
 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -388,6 +402,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               volume: provisioned.privateUser.volume,
             });
 
+            if (provisioned.welcomeBonusGranted > 0) {
+              announceSignupBonus(user.uid, provisioned.welcomeBonusGranted);
+            }
+
             // Auto-link pending referral code from URL or signup form if account has no referrer yet
             try {
               const pendingRef = sessionStorage.getItem(PENDING_REF_STORAGE_KEY);
@@ -483,7 +501,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       unsubAuth();
       cleanupSession();
     };
-  }, [pushToast]);
+  }, [announceSignupBonus, pushToast]);
 
   const setGraphicsQuality = useCallback(
     (_q: GraphicsQuality, _silent = true) => {
@@ -516,6 +534,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const signInWithGoogle = useCallback(async (): Promise<number> => {
     const cred = await signInWithPopup(auth, googleProvider);
     let resolvedBalance = 0;
+    let grantedBonus = 0;
     try {
       const provisioned = await ensureUserProvisioned({
         uid: cred.user.uid,
@@ -527,13 +546,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setFirestoreProfile(provisioned.profile);
       setFirestorePrivateUser(provisioned.privateUser);
       resolvedBalance = provisioned.profile.balance;
+      grantedBonus = provisioned.welcomeBonusGranted;
     } catch {
       resolvedBalance = 0;
     }
-    soundEngine.playCoinReward();
-    pushToast('Signed in with Google. Cloud wallet synced.', 'emerald');
+    if (!announceSignupBonus(cred.user.uid, grantedBonus)) {
+      soundEngine.playCoinReward();
+      pushToast('Signed in with Google. Cloud wallet synced.', 'emerald');
+    }
     return resolvedBalance;
-  }, [pushToast]);
+  }, [announceSignupBonus, pushToast]);
 
   const signInWithEmail = useCallback(
     async (email: string, password: string) => {
@@ -600,6 +622,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ok?: boolean;
         error?: string;
         sessionToken?: string;
+        signupBonusGranted?: number;
         user?: SessionAccountData;
       };
       if (!resp.ok || !data.ok || !data.user) {
@@ -607,11 +630,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       sessionTokenRef.current = data.sessionToken || null;
       setSessionUser(data.user);
-      soundEngine.playCoinReward();
-      pushToast(`Account created for ${data.user.profile.username}!`, 'emerald');
+      const grantedBonus = Number(data.signupBonusGranted || 0);
+      if (!announceSignupBonus(data.user.profile.uid, grantedBonus)) {
+        soundEngine.playCoinReward();
+        pushToast(`Account created for ${data.user.profile.username}!`, 'emerald');
+      }
       return data.user.profile.balance;
     },
-    [authFetch, pushToast],
+    [announceSignupBonus, authFetch, pushToast],
   );
 
   const sendResetPassword = useCallback(

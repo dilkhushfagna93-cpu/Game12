@@ -12,6 +12,7 @@ export interface PlatformLiquiditySettings {
   smartMatchmakingEnabled: boolean;
   matchmakingWaitSeconds: number;
   welcomeBonusAmount: number;
+  signupBonus?: number;
   requireFirstDepositToWithdraw: boolean;
   updatedAt?: unknown;
 }
@@ -143,6 +144,7 @@ export interface UserPrivate {
   username: string;
   role?: 'admin' | 'player';
   welcomeBonusClaimed?: boolean;
+  signupBonusClaimed?: boolean;
   lastDailyClaimDate: string;
   lastSpinDate?: string;
   streakDays: number;

@@ -143,6 +143,7 @@ export const DEFAULT_PLATFORM_LIQUIDITY_SETTINGS: PlatformLiquiditySettings = {
   smartMatchmakingEnabled: true,
   matchmakingWaitSeconds: 8,
   welcomeBonusAmount: 51,
+  signupBonus: 51,
   requireFirstDepositToWithdraw: true,
 };
 
@@ -226,9 +227,8 @@ export function normalizePlatformLiquiditySettings(
       ? raw.smartMatchmakingEnabled
       : DEFAULT_PLATFORM_LIQUIDITY_SETTINGS.smartMatchmakingEnabled;
 
-  const bonusNum = Math.round(
-    Number(raw?.welcomeBonusAmount ?? DEFAULT_PLATFORM_LIQUIDITY_SETTINGS.welcomeBonusAmount),
-  );
+  const rawBonusVal = raw?.signupBonus ?? raw?.welcomeBonusAmount ?? DEFAULT_PLATFORM_LIQUIDITY_SETTINGS.welcomeBonusAmount;
+  const bonusNum = Math.round(Number(rawBonusVal));
   const welcomeBonusAmount = Number.isFinite(bonusNum)
     ? Math.max(0, Math.min(500, bonusNum))
     : DEFAULT_PLATFORM_LIQUIDITY_SETTINGS.welcomeBonusAmount;
@@ -244,6 +244,7 @@ export function normalizePlatformLiquiditySettings(
     smartMatchmakingEnabled,
     matchmakingWaitSeconds,
     welcomeBonusAmount,
+    signupBonus: welcomeBonusAmount,
     requireFirstDepositToWithdraw,
     updatedAt: raw?.updatedAt,
   };
@@ -323,6 +324,7 @@ export async function syncPlatformLiquidityToServer(
       smartMatchmakingEnabled: normalized.smartMatchmakingEnabled,
       matchmakingWaitSeconds: normalized.matchmakingWaitSeconds,
       welcomeBonusAmount: normalized.welcomeBonusAmount,
+      signupBonus: normalized.welcomeBonusAmount,
       requireFirstDepositToWithdraw: normalized.requireFirstDepositToWithdraw,
     }),
   });
@@ -342,6 +344,7 @@ export async function savePlatformLiquiditySettings(
     smartMatchmakingEnabled: normalized.smartMatchmakingEnabled,
     matchmakingWaitSeconds: normalized.matchmakingWaitSeconds,
     welcomeBonusAmount: normalized.welcomeBonusAmount,
+    signupBonus: normalized.welcomeBonusAmount,
     requireFirstDepositToWithdraw: normalized.requireFirstDepositToWithdraw,
     updatedAt: serverTimestamp(),
   };
@@ -794,7 +797,14 @@ export async function adminReviewUpiRequest(params: {
       }
 
       const pubRef = doc(db, 'publicProfiles', req.userId);
-      const pubSnap = await tx.get(pubRef);
+      const privRef = doc(db, 'users', req.userId);
+      const referralRef = doc(db, 'referrals', `ref_${req.userId}`);
+      const isDepositApproval = req.type === 'deposit' && params.action === 'approved';
+      const [pubSnap, privSnap, refSnap] = await Promise.all([
+        tx.get(pubRef),
+        isDepositApproval ? tx.get(privRef) : Promise.resolve(null),
+        isDepositApproval ? tx.get(referralRef) : Promise.resolve(null),
+      ]);
       if (!pubSnap.exists()) throw new Error('Target user profile not found');
       const pub = pubSnap.data() as PublicProfile;
       const buckets = extractWalletBuckets(pub);
@@ -809,7 +819,7 @@ export async function adminReviewUpiRequest(params: {
         updatedAt: serverTimestamp(),
       });
 
-      if (req.type === 'deposit' && params.action === 'approved') {
+      if (isDepositApproval) {
         const credited = Math.min(req.amount, Math.max(0, 100000000 - buckets.totalBalance));
         const nextDeposit = buckets.depositBalance + credited;
         const nextBalance = nextDeposit + buckets.winningBalance + buckets.bonusBalance;
@@ -837,6 +847,22 @@ export async function adminReviewUpiRequest(params: {
           roundId: req.requestId,
           createdAt: serverTimestamp(),
         });
+
+        // Unlock Refer & Earn (+50 Bonus Coins) strictly upon the invited friend's first approved deposit
+        if (privSnap && privSnap.exists() && refSnap && refSnap.exists()) {
+          const priv = privSnap.data() as UserPrivate;
+          const refData = refSnap.data() as { status?: string };
+          if (priv.referredBy && !priv.referralRewardUnlocked && refData.status === 'pending') {
+            tx.update(privRef, {
+              referralRewardUnlocked: true,
+              updatedAt: serverTimestamp(),
+            });
+            tx.update(referralRef, {
+              status: 'unlocked',
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }
       } else if (req.type === 'withdrawal' && params.action === 'rejected') {
         const refunded = Math.min(req.amount, Math.max(0, 100000000 - buckets.totalBalance));
         const nextWinning = buckets.winningBalance + refunded;

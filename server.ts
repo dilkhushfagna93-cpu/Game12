@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import express from 'express';
+import { ROUTE_SEO_MAP } from './src/utils/seo.ts';
 
 dotenv.config();
 
@@ -909,6 +910,7 @@ interface ServerAccountRecord {
   lastSpinDate: string;
   referralCode: string;
   referredBy: string;
+  signupBonusClaimed: boolean;
   soundEnabled: boolean;
   musicEnabled: boolean;
   volume: number;
@@ -955,6 +957,9 @@ const authRateMap = new Map<string, { count: number; resetAtMs: number }>();
 const serverWalletTxByUid = new Map<string, ServerWalletTxRecord[]>();
 const serverUpiRequestsByUid = new Map<string, ServerUpiRequestRecord[]>();
 const serverPromoRedemptionsByUid = new Map<string, Set<string>>();
+const claimedSignupPhones = new Set<string>();
+const claimedSignupEmails = new Set<string>();
+const claimedSignupUids = new Set<string>();
 
 function appendServerWalletTx(uid: string, tx: ServerWalletTxRecord): void {
   const list = serverWalletTxByUid.get(uid) || [];
@@ -1137,7 +1142,8 @@ function serializeAccount(acc: ServerAccountRecord) {
       displayName: acc.fullName,
       username: acc.username,
       role: 'player' as const,
-      welcomeBonusClaimed: true,
+      welcomeBonusClaimed: acc.signupBonusClaimed,
+      signupBonusClaimed: acc.signupBonusClaimed,
       lastDailyClaimDate: acc.lastDailyClaimDate,
       lastSpinDate: acc.lastSpinDate,
       streakDays: acc.streakDays,
@@ -1278,8 +1284,45 @@ async function startServer() {
     return true;
   };
 
+  const fetchLiveSignupBonusFromFirestore = async (): Promise<number> => {
+    if (FIREBASE_PROJECT_ID) {
+      try {
+        const dbId = encodeURIComponent(FIRESTORE_DATABASE_ID || '(default)');
+        const settingsUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${dbId}/documents/settings/platform`;
+        const resp = await fetch(settingsUrl);
+        if (resp.ok) {
+          const json = (await resp.json()) as {
+            fields?: {
+              signupBonus?: { integerValue?: string; doubleValue?: number };
+              welcomeBonusAmount?: { integerValue?: string; doubleValue?: number };
+            };
+          };
+          const f = json.fields;
+          if (f) {
+            const rawVal =
+              f.signupBonus?.integerValue ??
+              f.signupBonus?.doubleValue ??
+              f.welcomeBonusAmount?.integerValue ??
+              f.welcomeBonusAmount?.doubleValue;
+            if (rawVal !== undefined) {
+              const parsed = Math.round(Number(rawVal));
+              if (Number.isFinite(parsed)) {
+                const clamped = Math.max(0, Math.min(500, parsed));
+                platformLiquidityConfig.welcomeBonusAmount = clamped;
+                return clamped;
+              }
+            }
+          }
+        }
+      } catch {
+        // Fallback to cached platformLiquidityConfig
+      }
+    }
+    return Math.max(0, Math.min(500, Math.round(platformLiquidityConfig.welcomeBonusAmount || 0)));
+  };
+
   // Sign Up: Full Name, 10-digit Indian Mobile (+91) or Email, Password, optional Referral Code
-  app.post('/api/auth/register', (req, res) => {
+  app.post('/api/auth/register', async (req, res) => {
     if (!checkAuthRateLimit(req, res)) return;
     const body = (req.body || {}) as {
       fullName?: unknown;
@@ -1352,7 +1395,14 @@ async function startServer() {
     const { salt, hash } = hashPasswordScrypt(password);
     const nowIso = new Date().toISOString();
 
-    // Initialize new users with 0 deposited balance and 0 free starting coins
+    // Credit admin-configured First-Time Signup Bonus strictly once per phone/email/uid
+    const configuredBonus = await fetchLiveSignupBonusFromFirestore();
+    const alreadyClaimed =
+      claimedSignupUids.has(uid) ||
+      (Boolean(cleanMobile) && claimedSignupPhones.has(cleanMobile)) ||
+      (Boolean(cleanEmail) && claimedSignupEmails.has(cleanEmail));
+    const grantedBonus = alreadyClaimed ? 0 : configuredBonus;
+
     const account: ServerAccountRecord = {
       uid,
       fullName,
@@ -1364,20 +1414,21 @@ async function startServer() {
       avatarSeed: username.slice(0, 16),
       depositBalance: 0,
       winningBalance: 0,
-      bonusBalance: 0,
+      bonusBalance: grantedBonus,
       totalDeposited: 0,
       totalWagered: 0,
       gamesPlayed: 0,
       wins: 0,
       totalWon: 0,
       winRate: 0,
-      weeklyScore: 0,
-      monthlyScore: 0,
+      weeklyScore: grantedBonus,
+      monthlyScore: grantedBonus,
       streakDays: 0,
       lastDailyClaimDate: '',
       lastSpinDate: '',
       referralCode: makeServerReferralCode(uid),
       referredBy: cleanRef,
+      signupBonusClaimed: true,
       soundEnabled: true,
       musicEnabled: false,
       volume: 0.65,
@@ -1389,14 +1440,38 @@ async function startServer() {
     };
 
     accountsByUid.set(uid, account);
-    if (cleanEmail) uidByEmail.set(cleanEmail, uid);
-    if (cleanMobile) uidByMobile.set(cleanMobile, uid);
+    if (cleanEmail) {
+      uidByEmail.set(cleanEmail, uid);
+      claimedSignupEmails.add(cleanEmail);
+    }
+    if (cleanMobile) {
+      uidByMobile.set(cleanMobile, uid);
+      claimedSignupPhones.add(cleanMobile);
+    }
+    claimedSignupUids.add(uid);
+
+    if (grantedBonus > 0) {
+      appendServerWalletTx(uid, {
+        txId: `tx_welcome_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+        userId: uid,
+        type: 'signup_bonus',
+        game: 'system',
+        bucket: 'bonus',
+        amount: grantedBonus,
+        balanceBefore: 0,
+        balanceAfter: grantedBonus,
+        description: 'Welcome Signup Bonus',
+        roundId: 'welcome_bonus',
+        createdAt: Date.now(),
+      });
+    }
 
     const sessionToken = signSessionToken(uid);
     setAuthSessionCookie(req, res, sessionToken);
     res.status(201).json({
       ok: true,
       sessionToken,
+      signupBonusGranted: grantedBonus,
       user: serializeAccount(account),
     });
   });
@@ -1965,12 +2040,12 @@ async function startServer() {
     }
 
     const rawWelcomeBonus = Math.round(
-      Number(req.body?.welcomeBonusAmount ?? platformLiquidityConfig.welcomeBonusAmount),
+      Number(req.body?.signupBonus ?? req.body?.welcomeBonusAmount ?? platformLiquidityConfig.welcomeBonusAmount),
     );
     if (!Number.isFinite(rawWelcomeBonus) || rawWelcomeBonus < 0 || rawWelcomeBonus > 500) {
       res.status(400).json({
         ok: false,
-        error: 'welcomeBonusAmount must be between ₹0 and ₹500.',
+        error: 'signupBonus must be between ₹0 and ₹500.',
       });
       return;
     }
@@ -1992,6 +2067,7 @@ async function startServer() {
     res.json({
       ok: true,
       ...platformLiquidityConfig,
+      signupBonus: rawWelcomeBonus,
       effectiveAviatorPayoutCap: getEffectiveAviatorPayoutCap(rawMode, rawCap),
       effectiveDragonTigerPayoutCap: getEffectiveDragonTigerPayoutCap(rawMode, rawCap),
       updatedBy: req.adminUser?.email || req.adminUser?.uid || 'admin',
@@ -2872,6 +2948,7 @@ async function startServer() {
   app.get('/api/wallet/bonus-policy', (_req, res) => {
     res.json({
       welcomeBonusAmount: platformLiquidityConfig.welcomeBonusAmount,
+      signupBonus: platformLiquidityConfig.welcomeBonusAmount,
       maxBonusContributionPct: Math.round(BONUS_MAX_CONTRIBUTION_RATIO * 100),
       starterTableMaxBonusOnly: BONUS_STARTER_TABLE_MAX_STAKE,
       preDepositWinCap: BONUS_PRE_DEPOSIT_WIN_CAP,
@@ -3482,6 +3559,158 @@ async function startServer() {
     });
   });
 
+  const escapeHtmlAttr = (value: string): string =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+  const resolveSiteOrigin = (req: express.Request): string => {
+    const envUrl = (process.env.APP_URL || '').trim();
+    if (envUrl) {
+      try {
+        const parsed = new URL(envUrl);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          return parsed.origin;
+        }
+      } catch {
+        // Fallback to request headers
+      }
+    }
+    const rawProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    const proto = rawProto === 'http' || rawProto === 'https' ? rawProto : 'https';
+    const rawHost = String(req.headers['x-forwarded-host'] || req.get('host') || `localhost:${PORT}`)
+      .split(',')[0]
+      .trim();
+    const safeHost = /^[a-zA-Z0-9.-]+(:\d{1,5})?$/.test(rawHost) ? rawHost : `localhost:${PORT}`;
+    return `${proto}://${safeHost}`;
+  };
+
+  const SITEMAP_ROUTES: Array<{ path: string; changefreq: string; priority: string }> = [
+    { path: '/', changefreq: 'daily', priority: '1.0' },
+    { path: '/games', changefreq: 'daily', priority: '0.95' },
+    { path: '/games/teen-patti', changefreq: 'daily', priority: '0.95' },
+    { path: '/games/ludo', changefreq: 'daily', priority: '0.95' },
+    { path: '/games/dragon-tiger', changefreq: 'daily', priority: '0.95' },
+    { path: '/games/aviator', changefreq: 'daily', priority: '0.95' },
+    { path: '/leaderboard', changefreq: 'hourly', priority: '0.85' },
+    { path: '/rewards', changefreq: 'daily', priority: '0.80' },
+    { path: '/download-apk', changefreq: 'weekly', priority: '0.80' },
+    { path: '/rules', changefreq: 'monthly', priority: '0.75' },
+    { path: '/fair-play', changefreq: 'monthly', priority: '0.70' },
+    { path: '/about', changefreq: 'monthly', priority: '0.65' },
+    { path: '/responsible-gaming', changefreq: 'monthly', priority: '0.60' },
+    { path: '/contact', changefreq: 'monthly', priority: '0.60' },
+    { path: '/privacy', changefreq: 'yearly', priority: '0.40' },
+    { path: '/terms', changefreq: 'yearly', priority: '0.40' },
+  ];
+
+  const injectRouteSeoIntoHtml = (html: string, reqPath: string, origin: string): string => {
+    const normalizedPath = reqPath.length > 1 && reqPath.endsWith('/') ? reqPath.slice(0, -1) : reqPath || '/';
+    const meta = ROUTE_SEO_MAP[normalizedPath] || ROUTE_SEO_MAP['/'];
+    const canonicalUrl = `${origin}${normalizedPath === '/' ? '/' : normalizedPath}`;
+    const ogImageUrl = `${origin}${meta.ogImage}`;
+    const robots = meta.robots || 'index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1';
+
+    const safeTitle = escapeHtmlAttr(meta.title);
+    const safeDesc = escapeHtmlAttr(meta.description);
+    const safeKeywords = escapeHtmlAttr(meta.keywords);
+    const safeRobots = escapeHtmlAttr(robots);
+    const safeCanonical = escapeHtmlAttr(canonicalUrl);
+    const safeOgImage = escapeHtmlAttr(ogImageUrl);
+    const safeOgAlt = escapeHtmlAttr(meta.ogImageAlt);
+
+    let updated = html
+      .replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${safeTitle}</title>`)
+      .replace(/<meta\s+name="description"[\s\S]*?\/>/i, () => `<meta name="description" content="${safeDesc}" />`)
+      .replace(/<meta\s+name="keywords"[\s\S]*?\/>/i, () => `<meta name="keywords" content="${safeKeywords}" />`)
+      .replace(/<meta\s+name="robots"[\s\S]*?\/>/i, () => `<meta name="robots" content="${safeRobots}" />`)
+      .replace(/<meta\s+property="og:url"[\s\S]*?\/>/i, () => `<meta property="og:url" content="${safeCanonical}" />`)
+      .replace(/<meta\s+property="og:title"[\s\S]*?\/>/i, () => `<meta property="og:title" content="${safeTitle}" />`)
+      .replace(
+        /<meta\s+property="og:description"[\s\S]*?\/>/i,
+        () => `<meta property="og:description" content="${safeDesc}" />`
+      )
+      .replace(/<meta\s+property="og:image"[\s\S]*?\/>/i, () => `<meta property="og:image" content="${safeOgImage}" />`)
+      .replace(
+        /<meta\s+property="og:image:alt"[\s\S]*?\/>/i,
+        () => `<meta property="og:image:alt" content="${safeOgAlt}" />`
+      )
+      .replace(/<meta\s+name="twitter:title"[\s\S]*?\/>/i, () => `<meta name="twitter:title" content="${safeTitle}" />`)
+      .replace(
+        /<meta\s+name="twitter:description"[\s\S]*?\/>/i,
+        () => `<meta name="twitter:description" content="${safeDesc}" />`
+      )
+      .replace(
+        /<meta\s+name="twitter:image"[\s\S]*?\/>/i,
+        () => `<meta name="twitter:image" content="${safeOgImage}" />`
+      )
+      .replace(
+        /<meta\s+name="twitter:image:alt"[\s\S]*?\/>/i,
+        () => `<meta name="twitter:image:alt" content="${safeOgAlt}" />`
+      );
+
+    if (/(?:<!--\s*CANONICAL_TAG\s*-->|<link\s+rel="canonical"[\s\S]*?\/>)/i.test(updated)) {
+      updated = updated.replace(
+        /(?:<!--\s*CANONICAL_TAG\s*-->|<link\s+rel="canonical"[\s\S]*?\/>)/i,
+        () => `<link rel="canonical" href="${safeCanonical}" />`
+      );
+    } else {
+      updated = updated.replace(/<\/head>/i, () => `    <link rel="canonical" href="${safeCanonical}" />\n  </head>`);
+    }
+
+    return updated;
+  };
+
+  app.get('/robots.txt', (req, res) => {
+    const origin = resolveSiteOrigin(req);
+    const body = [
+      'User-agent: *',
+      'Allow: /',
+      'Disallow: /admin',
+      'Disallow: /api/',
+      'Disallow: /wallet',
+      'Disallow: /transactions',
+      'Disallow: /history',
+      'Disallow: /profile',
+      'Disallow: /login',
+      'Disallow: /register',
+      '',
+      `Sitemap: ${origin}/sitemap.xml`,
+      '',
+    ].join('\n');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(body);
+  });
+
+  app.get('/sitemap.xml', (req, res) => {
+    const origin = resolveSiteOrigin(req);
+    const lastmod = new Date().toISOString().slice(0, 10);
+    const urlsXml = SITEMAP_ROUTES.map(
+      (entry) =>
+        `  <url>\n` +
+        `    <loc>${escapeHtmlAttr(`${origin}${entry.path}`)}</loc>\n` +
+        `    <lastmod>${lastmod}</lastmod>\n` +
+        `    <changefreq>${entry.changefreq}</changefreq>\n` +
+        `    <priority>${entry.priority}</priority>\n` +
+        `  </url>`
+    ).join('\n');
+    const xml =
+      `<?xml version="1.0" encoding="UTF-8"?>\n` +
+      `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+      `${urlsXml}\n` +
+      `</urlset>\n`;
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(xml);
+  });
+
   if (!IS_PROD) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -3491,11 +3720,18 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      const indexFile = path.join(distDir, 'index.html');
-      if (fs.existsSync(indexFile)) {
-        res.sendFile(indexFile);
+    const indexFile = path.join(distDir, 'index.html');
+    let cachedIndexHtml: string | null = null;
+    app.use(express.static(distDir, { index: false }));
+    app.get('*', (req, res) => {
+      if (!cachedIndexHtml && fs.existsSync(indexFile)) {
+        cachedIndexHtml = fs.readFileSync(indexFile, 'utf-8');
+      }
+      if (cachedIndexHtml) {
+        const origin = resolveSiteOrigin(req);
+        const html = injectRouteSeoIntoHtml(cachedIndexHtml, req.path, origin);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(html);
       } else {
         res.status(404).send('Build output not found.');
       }
@@ -3515,6 +3751,7 @@ async function startServer() {
             maxRoundPayoutCap?: { integerValue?: string; doubleValue?: number };
             smartMatchmakingEnabled?: { booleanValue?: boolean };
             matchmakingWaitSeconds?: { integerValue?: string; doubleValue?: number };
+            signupBonus?: { integerValue?: string; doubleValue?: number };
             welcomeBonusAmount?: { integerValue?: string; doubleValue?: number };
             requireFirstDepositToWithdraw?: { booleanValue?: boolean };
           };
@@ -3524,7 +3761,13 @@ async function startServer() {
         const mode = String(f.liquidityMode?.stringValue || '').toLowerCase() as LiquidityMode;
         const cap = Number(f.maxRoundPayoutCap?.integerValue ?? f.maxRoundPayoutCap?.doubleValue ?? 50000);
         const wait = Number(f.matchmakingWaitSeconds?.integerValue ?? f.matchmakingWaitSeconds?.doubleValue ?? 8);
-        const welcomeBonus = Number(f.welcomeBonusAmount?.integerValue ?? f.welcomeBonusAmount?.doubleValue ?? 51);
+        const welcomeBonus = Number(
+          f.signupBonus?.integerValue ??
+            f.signupBonus?.doubleValue ??
+            f.welcomeBonusAmount?.integerValue ??
+            f.welcomeBonusAmount?.doubleValue ??
+            51,
+        );
         platformLiquidityConfig = {
           liquidityMode: VALID_LIQUIDITY_MODES.has(mode) ? mode : 'balanced',
           maxRoundPayoutCap: Number.isFinite(cap) ? Math.max(100, Math.min(5_000_000, Math.round(cap))) : 50000,
