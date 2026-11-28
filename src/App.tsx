@@ -64,7 +64,7 @@ function RouteSideEffects() {
 }
 
 function AuthenticatedAppGate() {
-  const { authReady, isAuthenticated } = useApp();
+  const { authReady, isAuthenticated, balance } = useApp();
 
   if (!authReady) {
     return (
@@ -94,8 +94,11 @@ function AuthenticatedAppGate() {
         <Route path="/games/ludo" element={<LudoPage />} />
         <Route path="/games/aviator" element={<AviatorPage />} />
         <Route path="/games/teen-patti" element={<TeenPattiPage />} />
-        <Route path="/login" element={<Navigate to="/" replace />} />
-        <Route path="/register" element={<Navigate to="/" replace />} />
+        <Route
+          path="/login"
+          element={<Navigate to={balance <= 0 ? '/wallet?tab=deposit' : '/'} replace />}
+        />
+        <Route path="/register" element={<Navigate to="/wallet?tab=deposit" replace />} />
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/wallet" element={<WalletPage />} />
         <Route path="/transactions" element={<TransactionsPage />} />

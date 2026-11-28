@@ -36,10 +36,16 @@ import { soundEngine } from '../services/soundEngine';
 import {
   applyReferralCode,
   claimDailyLoginReward,
+  claimLowBalanceRefill,
   ensureUserProvisioned,
   extractWalletBuckets,
+  fetchUserTransactions,
+  fetchUserUpiRequests,
   placeAtomicBet,
+  redeemPromoCode,
   settleAtomicGameRound,
+  submitUpiDepositRequest,
+  submitUpiWithdrawalRequest,
   updateUserProfileAndSettings,
 } from '../services/walletService';
 import type {
@@ -50,7 +56,9 @@ import type {
   GraphicsQuality,
   PlatformLiquiditySettings,
   PublicProfile,
+  UpiRequestRecord,
   UserPrivate,
+  WalletTransaction,
 } from '../types';
 
 export interface ToastNotice {
@@ -64,6 +72,12 @@ export interface SessionAccountData {
   privateUser: UserPrivate;
   mobile: string;
   fullName: string;
+}
+
+export interface PasswordRecoveryLookup {
+  mode: 'email_linked' | 'verify_name' | 'email_server';
+  maskedEmail?: string;
+  hasServerAccount?: boolean;
 }
 
 const PENDING_REF_STORAGE_KEY = 'aurelia_pending_ref_code';
@@ -91,10 +105,10 @@ interface AppContextValue {
   platformSettings: PlatformLiquiditySettings;
   apkConfig: ApkConfig;
   refreshConfigs: () => Promise<void>;
-  signInWithGoogle: () => Promise<void>;
+  signInWithGoogle: () => Promise<number>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   registerWithEmail: (email: string, password: string, username: string, referralCode?: string) => Promise<void>;
-  loginWithCredentials: (identifier: string, password: string) => Promise<void>;
+  loginWithCredentials: (identifier: string, password: string) => Promise<number>;
   registerWithCredentials: (params: {
     fullName: string;
     contactType: 'mobile' | 'email';
@@ -102,10 +116,21 @@ interface AppContextValue {
     email?: string;
     password: string;
     referralCode?: string;
-  }) => Promise<void>;
+  }) => Promise<number>;
   updateAccountProfile: (opts: { username: string; avatarSeed: string }) => Promise<void>;
   claimDailyCheckIn: () => Promise<{ reward: number; streakDays: number; nextBalance: number }>;
+  fetchAccountWalletFeed: () => Promise<{ transactions: WalletTransaction[]; upiRequests: UpiRequestRecord[] }>;
+  submitAccountDeposit: (params: { amount: number; utr: string }) => Promise<UpiRequestRecord>;
+  submitAccountWithdrawal: (params: { amount: number; upiId: string }) => Promise<number>;
+  redeemAccountPromo: (params: {
+    code: string;
+    depositAmount?: number;
+  }) => Promise<{ code: string; bonusAmount: number; nextBalance: number; description: string }>;
+  claimAccountRefill: () => Promise<number>;
   sendResetPassword: (email: string) => Promise<void>;
+  lookupPasswordRecovery: (identifier: string) => Promise<PasswordRecoveryLookup>;
+  verifyRecoveryFullName: (identifier: string, fullName: string) => Promise<string>;
+  completePasswordRecovery: (recoveryToken: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   placeBet: (game: GameId, amount: number, roundId: string, description: string) => Promise<number>;
   settleRound: (params: {
@@ -488,10 +513,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [authFetch, firebaseUser, sessionUser],
   );
 
-  const signInWithGoogle = useCallback(async () => {
-    await signInWithPopup(auth, googleProvider);
+  const signInWithGoogle = useCallback(async (): Promise<number> => {
+    const cred = await signInWithPopup(auth, googleProvider);
+    let resolvedBalance = 0;
+    try {
+      const provisioned = await ensureUserProvisioned({
+        uid: cred.user.uid,
+        email: cred.user.email || '',
+        displayName: cred.user.displayName || '',
+        defaultGraphics: 'ultra',
+      });
+      setFirebaseUser(cred.user);
+      setFirestoreProfile(provisioned.profile);
+      setFirestorePrivateUser(provisioned.privateUser);
+      resolvedBalance = provisioned.profile.balance;
+    } catch {
+      resolvedBalance = 0;
+    }
     soundEngine.playCoinReward();
     pushToast('Signed in with Google. Cloud wallet synced.', 'emerald');
+    return resolvedBalance;
   }, [pushToast]);
 
   const signInWithEmail = useCallback(
@@ -525,7 +566,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const loginWithCredentials = useCallback(
-    async (identifier: string, password: string) => {
+    async (identifier: string, password: string): Promise<number> => {
       const resp = await authFetch('/api/auth/login', { identifier, password });
       const data = (await resp.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -540,6 +581,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setSessionUser(data.user);
       soundEngine.playCoinReward();
       pushToast(`Welcome back, ${data.user.profile.username}!`, 'emerald');
+      return data.user.profile.balance;
     },
     [authFetch, pushToast],
   );
@@ -552,7 +594,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       email?: string;
       password: string;
       referralCode?: string;
-    }) => {
+    }): Promise<number> => {
       const resp = await authFetch('/api/auth/register', params);
       const data = (await resp.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -567,6 +609,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setSessionUser(data.user);
       soundEngine.playCoinReward();
       pushToast(`Account created for ${data.user.profile.username}!`, 'emerald');
+      return data.user.profile.balance;
     },
     [authFetch, pushToast],
   );
@@ -577,6 +620,60 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       pushToast('Password reset link sent to your email.', 'emerald');
     },
     [pushToast],
+  );
+
+  const lookupPasswordRecovery = useCallback(
+    async (identifier: string): Promise<PasswordRecoveryLookup> => {
+      const resp = await authFetch('/api/auth/recover/lookup', { identifier });
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        mode?: PasswordRecoveryLookup['mode'];
+        maskedEmail?: string;
+        hasServerAccount?: boolean;
+      };
+      if (!resp.ok || !data.ok || !data.mode) {
+        throw new Error(data.error || 'Unable to locate account for password reset.');
+      }
+      return {
+        mode: data.mode,
+        maskedEmail: data.maskedEmail,
+        hasServerAccount: data.hasServerAccount,
+      };
+    },
+    [authFetch],
+  );
+
+  const verifyRecoveryFullName = useCallback(
+    async (identifier: string, fullName: string): Promise<string> => {
+      const resp = await authFetch('/api/auth/recover/verify-name', { identifier, fullName });
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        recoveryToken?: string;
+      };
+      if (!resp.ok || !data.ok || !data.recoveryToken) {
+        throw new Error(data.error || 'Registered full name did not match our records.');
+      }
+      return data.recoveryToken;
+    },
+    [authFetch],
+  );
+
+  const completePasswordRecovery = useCallback(
+    async (recoveryToken: string, newPassword: string): Promise<void> => {
+      const resp = await authFetch('/api/auth/recover/complete', { recoveryToken, newPassword });
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+      };
+      if (!resp.ok || !data.ok) {
+        throw new Error(data.error || 'Unable to update password. Please try again.');
+      }
+      soundEngine.playCoinReward();
+      pushToast('Password updated! You can now log in.', 'emerald');
+    },
+    [authFetch, pushToast],
   );
 
   const logout = useCallback(async () => {
@@ -668,6 +765,151 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
     }
     throw new Error('Please sign in to claim daily rewards.');
+  }, [authFetch, firebaseUser, hasVerifiedFirebase, sessionUser]);
+
+  const fetchAccountWalletFeed = useCallback(async (): Promise<{
+    transactions: WalletTransaction[];
+    upiRequests: UpiRequestRecord[];
+  }> => {
+    if (hasVerifiedFirebase && firebaseUser) {
+      const [transactions, upiRequests] = await Promise.all([
+        fetchUserTransactions(firebaseUser.uid, 60).catch(() => []),
+        fetchUserUpiRequests(firebaseUser.uid).catch(() => []),
+      ]);
+      return { transactions, upiRequests };
+    }
+    if (sessionUser) {
+      const resp = await authFetch('/api/account/wallet', undefined, 'GET');
+      if (!resp.ok) return { transactions: [], upiRequests: [] };
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        transactions?: WalletTransaction[];
+        upiRequests?: UpiRequestRecord[];
+      };
+      return {
+        transactions: Array.isArray(data.transactions) ? data.transactions : [],
+        upiRequests: Array.isArray(data.upiRequests) ? data.upiRequests : [],
+      };
+    }
+    return { transactions: [], upiRequests: [] };
+  }, [authFetch, firebaseUser, hasVerifiedFirebase, sessionUser]);
+
+  const submitAccountDeposit = useCallback(
+    async (params: { amount: number; utr: string }): Promise<UpiRequestRecord> => {
+      if (hasVerifiedFirebase && firebaseUser && firestoreProfile) {
+        return submitUpiDepositRequest({
+          uid: firebaseUser.uid,
+          username: firestoreProfile.username,
+          amount: params.amount,
+          utr: params.utr,
+        });
+      }
+      if (sessionUser) {
+        const resp = await authFetch('/api/account/upi/deposit', params);
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          request?: UpiRequestRecord;
+        };
+        if (!resp.ok || !data.ok || !data.request) {
+          throw new Error(data.error || 'Unable to submit deposit request');
+        }
+        return data.request;
+      }
+      throw new Error('Please log in to submit Direct UPI deposits.');
+    },
+    [authFetch, firebaseUser, firestoreProfile, hasVerifiedFirebase, sessionUser],
+  );
+
+  const submitAccountWithdrawal = useCallback(
+    async (params: { amount: number; upiId: string }): Promise<number> => {
+      if (hasVerifiedFirebase && firebaseUser && firestoreProfile) {
+        const res = await submitUpiWithdrawalRequest({
+          uid: firebaseUser.uid,
+          username: firestoreProfile.username,
+          amount: params.amount,
+          upiId: params.upiId,
+          totalDeposited: firestoreProfile.totalDeposited,
+        });
+        return res.nextBalance;
+      }
+      if (sessionUser) {
+        const resp = await authFetch('/api/account/upi/withdraw', params);
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          nextBalance?: number;
+          user?: SessionAccountData;
+        };
+        if (!resp.ok || !data.ok || !data.user) {
+          throw new Error(data.error || 'Unable to submit withdrawal request');
+        }
+        setSessionUser(data.user);
+        return data.nextBalance ?? data.user.profile.balance;
+      }
+      throw new Error('Please log in to request withdrawals.');
+    },
+    [authFetch, firebaseUser, firestoreProfile, hasVerifiedFirebase, sessionUser],
+  );
+
+  const redeemAccountPromo = useCallback(
+    async (params: {
+      code: string;
+      depositAmount?: number;
+    }): Promise<{ code: string; bonusAmount: number; nextBalance: number; description: string }> => {
+      if (hasVerifiedFirebase && firebaseUser) {
+        return redeemPromoCode({
+          uid: firebaseUser.uid,
+          code: params.code,
+          depositAmount: params.depositAmount,
+        });
+      }
+      if (sessionUser) {
+        const resp = await authFetch('/api/account/promo/redeem', params);
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          code?: string;
+          bonusAmount?: number;
+          nextBalance?: number;
+          description?: string;
+          user?: SessionAccountData;
+        };
+        if (!resp.ok || !data.ok || !data.user || !data.code || !data.bonusAmount) {
+          throw new Error(data.error || 'Invalid promo code');
+        }
+        setSessionUser(data.user);
+        return {
+          code: data.code,
+          bonusAmount: data.bonusAmount,
+          nextBalance: data.nextBalance ?? data.user.profile.balance,
+          description: data.description || `+${data.bonusAmount} Bonus Coins`,
+        };
+      }
+      throw new Error('Please log in to redeem promo codes.');
+    },
+    [authFetch, firebaseUser, hasVerifiedFirebase, sessionUser],
+  );
+
+  const claimAccountRefill = useCallback(async (): Promise<number> => {
+    if (hasVerifiedFirebase && firebaseUser) {
+      return claimLowBalanceRefill(firebaseUser.uid);
+    }
+    if (sessionUser) {
+      const resp = await authFetch('/api/account/refill', {});
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        nextBalance?: number;
+        user?: SessionAccountData;
+      };
+      if (!resp.ok || !data.ok || !data.user) {
+        throw new Error(data.error || 'Unable to claim refill');
+      }
+      setSessionUser(data.user);
+      return data.nextBalance ?? data.user.profile.balance;
+    }
+    throw new Error('Please log in to claim free refill.');
   }, [authFetch, firebaseUser, hasVerifiedFirebase, sessionUser]);
 
   const placeBet = useCallback(
@@ -773,7 +1015,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         registerWithCredentials,
         updateAccountProfile,
         claimDailyCheckIn,
+        fetchAccountWalletFeed,
+        submitAccountDeposit,
+        submitAccountWithdrawal,
+        redeemAccountPromo,
+        claimAccountRefill,
         sendResetPassword,
+        lookupPasswordRecovery,
+        verifyRecoveryFullName,
+        completePasswordRecovery,
         logout,
         placeBet,
         settleRound,

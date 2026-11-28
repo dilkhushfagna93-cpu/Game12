@@ -1,12 +1,25 @@
 import React, { useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, Gift, Lock, Mail, Phone, ShieldCheck, User } from 'lucide-react';
+import {
+  ArrowLeft,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  Gift,
+  KeyRound,
+  Lock,
+  Mail,
+  Phone,
+  ShieldCheck,
+  User,
+} from 'lucide-react';
 import { VIRTUAL_COIN_DISCLAIMER } from '../config/assets';
 import { useApp } from '../context/AppContext';
 import { soundEngine } from '../services/soundEngine';
 
 type AuthTab = 'login' | 'signup';
 type SignUpContactType = 'mobile' | 'email';
+type RecoveryStep = 'lookup' | 'verify_name' | 'new_password' | 'done';
 
 const AUTH_PARTICLES = [
   { left: '8%', bottom: '12%', size: 4, duration: 9, delay: 0, drift: 18 },
@@ -28,7 +41,15 @@ function normalizeIndianMobile(raw: string): string {
 }
 
 export default function AuthPage() {
-  const { signInWithGoogle, loginWithCredentials, registerWithCredentials } = useApp();
+  const {
+    signInWithGoogle,
+    loginWithCredentials,
+    registerWithCredentials,
+    sendResetPassword,
+    lookupPasswordRecovery,
+    verifyRecoveryFullName,
+    completePasswordRecovery,
+  } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -39,6 +60,19 @@ export default function AuthPage() {
   const [loginIdentifier, setLoginIdentifier] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
+
+  // Forgot Password State (kept strictly in component memory)
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [recoveryStep, setRecoveryStep] = useState<RecoveryStep>('lookup');
+  const [recoveryIdentifier, setRecoveryIdentifier] = useState('');
+  const [recoveryFullName, setRecoveryFullName] = useState('');
+  const [recoveryToken, setRecoveryToken] = useState('');
+  const [recoveryNewPassword, setRecoveryNewPassword] = useState('');
+  const [recoveryConfirmPassword, setRecoveryConfirmPassword] = useState('');
+  const [showRecoveryNewPassword, setShowRecoveryNewPassword] = useState(false);
+  const [showRecoveryConfirmPassword, setShowRecoveryConfirmPassword] = useState(false);
+  const [recoveryDoneMessage, setRecoveryDoneMessage] = useState('');
+  const [recoveryError, setRecoveryError] = useState('');
 
   // Sign Up State
   const [fullName, setFullName] = useState('');
@@ -72,6 +106,39 @@ export default function AuthPage() {
     setErrorMsg('');
   };
 
+  const openForgotPassword = () => {
+    soundEngine.playClick();
+    setRecoveryIdentifier(loginIdentifier.trim());
+    setRecoveryFullName('');
+    setRecoveryToken('');
+    setRecoveryNewPassword('');
+    setRecoveryConfirmPassword('');
+    setShowRecoveryNewPassword(false);
+    setShowRecoveryConfirmPassword(false);
+    setRecoveryDoneMessage('');
+    setRecoveryError('');
+    setRecoveryStep('lookup');
+    setErrorMsg('');
+    setForgotOpen(true);
+  };
+
+  const closeForgotPassword = (prefillLogin?: string) => {
+    soundEngine.playClick();
+    if (prefillLogin) {
+      setLoginIdentifier(prefillLogin);
+      setLoginPassword('');
+    }
+    setRecoveryFullName('');
+    setRecoveryToken('');
+    setRecoveryNewPassword('');
+    setRecoveryConfirmPassword('');
+    setRecoveryDoneMessage('');
+    setRecoveryError('');
+    setRecoveryStep('lookup');
+    setForgotOpen(false);
+    setActiveTab('login');
+  };
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
@@ -102,8 +169,12 @@ export default function AuthPage() {
 
     setBusy(true);
     try {
-      await loginWithCredentials(rawId, loginPassword);
-      navigate('/', { replace: true });
+      const nextBalance = await loginWithCredentials(rawId, loginPassword);
+      if (nextBalance <= 0) {
+        navigate('/wallet?tab=deposit', { replace: true, state: { openDepositDesk: true } });
+      } else {
+        navigate('/', { replace: true });
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Unable to sign in. Please try again.');
     } finally {
@@ -155,7 +226,7 @@ export default function AuthPage() {
         password: signupPassword,
         referralCode: cleanRef || undefined,
       });
-      navigate('/', { replace: true });
+      navigate('/wallet?tab=deposit', { replace: true, state: { openDepositDesk: true } });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Unable to create account. Please try again.');
     } finally {
@@ -177,10 +248,145 @@ export default function AuthPage() {
           // ignore storage error
         }
       }
-      await signInWithGoogle();
-      navigate('/', { replace: true });
+      const nextBalance = await signInWithGoogle();
+      if (activeTab === 'signup' || nextBalance <= 0) {
+        navigate('/wallet?tab=deposit', { replace: true, state: { openDepositDesk: true } });
+      } else {
+        navigate('/', { replace: true });
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Google sign-in could not be completed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRecoveryLookupSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRecoveryError('');
+    const rawId = recoveryIdentifier.trim();
+
+    if (!rawId) {
+      setRecoveryError('Please enter your 10-digit mobile number or email address.');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      if (rawId.includes('@')) {
+        const cleanEmail = rawId.toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleanEmail)) {
+          setRecoveryError('Please enter a valid email address.');
+          return;
+        }
+        try {
+          await sendResetPassword(cleanEmail);
+          setRecoveryDoneMessage(
+            'Password reset link sent to your email. Check your Inbox or Spam folder.',
+          );
+          setRecoveryStep('done');
+          return;
+        } catch (firebaseErr: unknown) {
+          const code =
+            typeof firebaseErr === 'object' && firebaseErr && 'code' in firebaseErr
+              ? String((firebaseErr as { code?: unknown }).code || '')
+              : '';
+          if (code === 'auth/invalid-email') {
+            setRecoveryError('Please enter a valid email address.');
+            return;
+          }
+          // Check if this email belongs to a server-registered account (when Firebase Auth user isn't present)
+          const serverLookup = await lookupPasswordRecovery(cleanEmail).catch(() => null);
+          if (serverLookup?.hasServerAccount) {
+            setRecoveryIdentifier(cleanEmail);
+            setRecoveryStep('verify_name');
+            return;
+          }
+          if (code === 'auth/user-not-found') {
+            setRecoveryError('No registered account found with that email address.');
+            return;
+          }
+          setRecoveryError(
+            firebaseErr instanceof Error
+              ? firebaseErr.message
+              : 'Unable to send reset email right now. Please try again.',
+          );
+          return;
+        }
+      }
+
+      const normalizedMobile = normalizeIndianMobile(rawId);
+      if (!/^\d{10}$/.test(normalizedMobile)) {
+        setRecoveryError('Enter a valid 10-digit Indian mobile number (+91) or email address.');
+        return;
+      }
+
+      const res = await lookupPasswordRecovery(normalizedMobile);
+      setRecoveryIdentifier(normalizedMobile);
+      if (res.mode === 'email_linked' && res.maskedEmail) {
+        setRecoveryDoneMessage(`Reset link sent to linked email ${res.maskedEmail}`);
+        setRecoveryStep('done');
+        return;
+      }
+      setRecoveryStep('verify_name');
+    } catch (err) {
+      setRecoveryError(
+        err instanceof Error ? err.message : 'Unable to locate your account. Please try again.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRecoveryVerifyNameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRecoveryError('');
+    const cleanName = recoveryFullName.trim();
+    if (cleanName.length < 2) {
+      setRecoveryError('Enter your registered full name (at least 2 characters).');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const token = await verifyRecoveryFullName(recoveryIdentifier.trim(), cleanName);
+      setRecoveryToken(token);
+      setRecoveryNewPassword('');
+      setRecoveryConfirmPassword('');
+      setRecoveryStep('new_password');
+    } catch (err) {
+      setRecoveryError(
+        err instanceof Error ? err.message : 'Registered full name did not match our records.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRecoveryCompleteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRecoveryError('');
+    if (recoveryNewPassword.length < 6 || recoveryNewPassword.length > 128) {
+      setRecoveryError('New password must be between 6 and 128 characters.');
+      return;
+    }
+    if (recoveryNewPassword !== recoveryConfirmPassword) {
+      setRecoveryError('Passwords do not match. Please re-enter carefully.');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await completePasswordRecovery(recoveryToken, recoveryNewPassword);
+      setRecoveryToken('');
+      setRecoveryNewPassword('');
+      setRecoveryConfirmPassword('');
+      setRecoveryDoneMessage('Password updated securely! You can now log in with your new password.');
+      setRecoveryStep('done');
+    } catch (err) {
+      setRecoveryError(
+        err instanceof Error ? err.message : 'Unable to update password. Please try again.',
+      );
     } finally {
       setBusy(false);
     }
@@ -307,110 +513,374 @@ export default function AuthPage() {
         {/* Glassmorphic Gold-Rimmed Auth Card */}
         <div className="rounded-3xl p-[1px] bg-gradient-to-b from-[#f6dc93]/55 via-[#d4af37]/30 to-[#785412]/40 shadow-[0_24px_80px_rgba(0,0,0,0.92),0_0_40px_rgba(212,175,55,0.12)]">
           <div className="rounded-[23px] bg-[#0e0a18]/90 backdrop-blur-xl p-6 sm:p-7 space-y-5">
-            {/* Login / Sign Up Segmented Tab Toggles */}
-            <div
-              role="tablist"
-              aria-label="Authentication mode"
-              className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-black/55 border border-[#d4af37]/20"
-            >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === 'login'}
-                onClick={() => switchTab('login')}
-                className={`min-h-[44px] rounded-lg text-sm font-bold whitespace-nowrap transition-all ${
-                  activeTab === 'login'
-                    ? 'gold-button shadow-md'
-                    : 'text-zinc-300 hover:text-white hover:bg-white/5'
-                }`}
-              >
-                Login
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === 'signup'}
-                onClick={() => switchTab('signup')}
-                className={`min-h-[44px] rounded-lg text-sm font-bold whitespace-nowrap transition-all ${
-                  activeTab === 'signup'
-                    ? 'gold-button shadow-md'
-                    : 'text-zinc-300 hover:text-white hover:bg-white/5'
-                }`}
-              >
-                Sign Up
-              </button>
-            </div>
-
-            {activeTab === 'login' ? (
-              <form onSubmit={(e) => void handleLoginSubmit(e)} noValidate className="space-y-4">
-                <div className="space-y-1.5">
-                  <label htmlFor="auth-login-id" className="block text-xs font-medium text-zinc-300">
-                    Mobile Number (+91) or Email
-                  </label>
-                  <div className="relative flex items-center">
-                    <Phone className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
-                    <input
-                      id="auth-login-id"
-                      type="text"
-                      autoComplete="username"
-                      value={loginIdentifier}
-                      onChange={(e) => {
-                        setLoginIdentifier(e.target.value);
-                        if (errorMsg) setErrorMsg('');
-                      }}
-                      placeholder="9876543210 or player@example.com"
-                      className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1.5">
-                  <label htmlFor="auth-login-pass" className="block text-xs font-medium text-zinc-300">
-                    Password
-                  </label>
-                  <div className="relative flex items-center">
-                    <Lock className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
-                    <input
-                      id="auth-login-pass"
-                      type={showLoginPassword ? 'text' : 'password'}
-                      autoComplete="current-password"
-                      value={loginPassword}
-                      onChange={(e) => {
-                        setLoginPassword(e.target.value);
-                        if (errorMsg) setErrorMsg('');
-                      }}
-                      placeholder="Enter your password"
-                      className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
-                    />
+            {forgotOpen ? (
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-[#d4af37]/35 bg-gradient-to-b from-[#1a132c]/90 to-[#0d0917]/95 p-4 space-y-1.5 shadow-[inset_0_1px_0_rgba(255,243,196,0.14)]">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 h-8 rounded-lg bg-[#d4af37]/15 border border-[#d4af37]/40 flex items-center justify-center text-[#f6dc93]">
+                        <KeyRound className="w-4 h-4" aria-hidden="true" />
+                      </span>
+                      <div>
+                        <h2 className="text-base font-bold text-[#f6dc93] tracking-wide">
+                          Reset Password
+                        </h2>
+                        <p className="text-[11px] text-zinc-400">
+                          {recoveryStep === 'lookup' && 'Recover access via Email or +91 Mobile'}
+                          {recoveryStep === 'verify_name' && 'Step 2 · Verify Account Ownership'}
+                          {recoveryStep === 'new_password' && 'Step 3 · Set a New Password'}
+                          {recoveryStep === 'done' && 'Recovery Request Complete'}
+                        </p>
+                      </div>
+                    </div>
                     <button
                       type="button"
-                      onClick={() => setShowLoginPassword((v) => !v)}
-                      aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
-                      className="absolute right-1 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-zinc-400 hover:text-[#f6dc93]"
+                      disabled={busy}
+                      onClick={() => closeForgotPassword()}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-zinc-300 hover:text-[#f6dc93] px-2 py-1 rounded-lg hover:bg-white/5 transition-colors"
                     >
-                      {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>Back</span>
                     </button>
                   </div>
                 </div>
 
-                {errorMsg && (
-                  <div
-                    role="alert"
-                    className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200 leading-relaxed"
-                  >
-                    {errorMsg}
-                  </div>
+                {recoveryStep === 'lookup' && (
+                  <form onSubmit={(e) => void handleRecoveryLookupSubmit(e)} noValidate className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label htmlFor="auth-recover-id" className="block text-xs font-medium text-zinc-300">
+                        Registered Mobile Number (+91) or Email
+                      </label>
+                      <div className="relative flex items-center">
+                        <Mail className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
+                        <input
+                          id="auth-recover-id"
+                          type="text"
+                          autoComplete="username"
+                          value={recoveryIdentifier}
+                          onChange={(e) => {
+                            setRecoveryIdentifier(e.target.value);
+                            if (recoveryError) setRecoveryError('');
+                          }}
+                          placeholder="9876543210 or player@example.com"
+                          className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
+                        />
+                      </div>
+                      <p className="text-[11px] text-zinc-400 leading-relaxed">
+                        Email accounts receive a reset link directly. Mobile accounts verify via linked email or registered full name.
+                      </p>
+                    </div>
+
+                    {recoveryError && (
+                      <div
+                        role="alert"
+                        className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200 leading-relaxed"
+                      >
+                        {recoveryError}
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="w-full min-h-[48px] gold-button py-3 px-4 rounded-xl text-sm font-bold whitespace-nowrap disabled:opacity-50"
+                    >
+                      {busy ? 'Checking Account...' : 'Send Reset Link / Continue'}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => closeForgotPassword()}
+                      className="w-full min-h-[42px] py-2 px-4 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-zinc-300 hover:text-white transition-colors"
+                    >
+                      Back to Login
+                    </button>
+                  </form>
                 )}
 
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="w-full min-h-[48px] gold-button py-3 px-4 rounded-xl text-sm font-bold whitespace-nowrap disabled:opacity-50"
-                >
-                  {busy ? 'Entering Arena...' : 'Login to Arena'}
-                </button>
-              </form>
+                {recoveryStep === 'verify_name' && (
+                  <form onSubmit={(e) => void handleRecoveryVerifyNameSubmit(e)} noValidate className="space-y-4">
+                    <div className="p-3 rounded-xl bg-[#d4af37]/10 border border-[#d4af37]/25 text-xs text-zinc-200 leading-relaxed">
+                      No recovery email is linked to{' '}
+                      <span className="font-mono-num font-semibold text-[#f6dc93]">
+                        {recoveryIdentifier.includes('@') ? recoveryIdentifier : `+91 ${recoveryIdentifier}`}
+                      </span>
+                      . Enter your registered <span className="font-semibold text-[#f6dc93]">Full Name</span> to verify ownership.
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label htmlFor="auth-recover-fullname" className="block text-xs font-medium text-zinc-300">
+                        Registered Full Name
+                      </label>
+                      <div className="relative flex items-center">
+                        <User className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
+                        <input
+                          id="auth-recover-fullname"
+                          type="text"
+                          autoComplete="name"
+                          maxLength={64}
+                          value={recoveryFullName}
+                          onChange={(e) => {
+                            setRecoveryFullName(e.target.value);
+                            if (recoveryError) setRecoveryError('');
+                          }}
+                          placeholder="Enter exact full name from sign up"
+                          className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
+                        />
+                      </div>
+                    </div>
+
+                    {recoveryError && (
+                      <div
+                        role="alert"
+                        className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200 leading-relaxed"
+                      >
+                        {recoveryError}
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="w-full min-h-[48px] gold-button py-3 px-4 rounded-xl text-sm font-bold whitespace-nowrap disabled:opacity-50"
+                    >
+                      {busy ? 'Verifying...' : 'Verify Identity'}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => closeForgotPassword()}
+                      className="w-full min-h-[42px] py-2 px-4 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-zinc-300 hover:text-white transition-colors"
+                    >
+                      Back to Login
+                    </button>
+                  </form>
+                )}
+
+                {recoveryStep === 'new_password' && (
+                  <form onSubmit={(e) => void handleRecoveryCompleteSubmit(e)} noValidate className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label htmlFor="auth-recover-newpass" className="block text-xs font-medium text-zinc-300">
+                        New Password (min 6 characters)
+                      </label>
+                      <div className="relative flex items-center">
+                        <Lock className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
+                        <input
+                          id="auth-recover-newpass"
+                          type={showRecoveryNewPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={recoveryNewPassword}
+                          onChange={(e) => {
+                            setRecoveryNewPassword(e.target.value);
+                            if (recoveryError) setRecoveryError('');
+                          }}
+                          placeholder="Create a new password"
+                          className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowRecoveryNewPassword((v) => !v)}
+                          aria-label={showRecoveryNewPassword ? 'Hide password' : 'Show password'}
+                          className="absolute right-1 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-zinc-400 hover:text-[#f6dc93]"
+                        >
+                          {showRecoveryNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label htmlFor="auth-recover-confirmpass" className="block text-xs font-medium text-zinc-300">
+                        Confirm New Password
+                      </label>
+                      <div className="relative flex items-center">
+                        <Lock className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
+                        <input
+                          id="auth-recover-confirmpass"
+                          type={showRecoveryConfirmPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={recoveryConfirmPassword}
+                          onChange={(e) => {
+                            setRecoveryConfirmPassword(e.target.value);
+                            if (recoveryError) setRecoveryError('');
+                          }}
+                          placeholder="Re-enter new password"
+                          className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowRecoveryConfirmPassword((v) => !v)}
+                          aria-label={showRecoveryConfirmPassword ? 'Hide password' : 'Show password'}
+                          className="absolute right-1 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-zinc-400 hover:text-[#f6dc93]"
+                        >
+                          {showRecoveryConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {recoveryError && (
+                      <div
+                        role="alert"
+                        className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200 leading-relaxed"
+                      >
+                        {recoveryError}
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="w-full min-h-[48px] gold-button py-3 px-4 rounded-xl text-sm font-bold whitespace-nowrap disabled:opacity-50"
+                    >
+                      {busy ? 'Updating Password...' : 'Update Password'}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => closeForgotPassword()}
+                      className="w-full min-h-[42px] py-2 px-4 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-xs font-semibold text-zinc-300 hover:text-white transition-colors"
+                    >
+                      Back to Login
+                    </button>
+                  </form>
+                )}
+
+                {recoveryStep === 'done' && (
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-2xl bg-emerald-950/45 border border-emerald-500/35 flex items-start gap-3">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" aria-hidden="true" />
+                      <p className="text-xs sm:text-sm text-emerald-100 leading-relaxed">
+                        {recoveryDoneMessage}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => closeForgotPassword(recoveryIdentifier.trim())}
+                      className="w-full min-h-[48px] gold-button py-3 px-4 rounded-xl text-sm font-bold whitespace-nowrap"
+                    >
+                      Back to Login
+                    </button>
+                  </div>
+                )}
+              </div>
             ) : (
+              <>
+                {/* Login / Sign Up Segmented Tab Toggles */}
+                <div
+                  role="tablist"
+                  aria-label="Authentication mode"
+                  className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-black/55 border border-[#d4af37]/20"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === 'login'}
+                    onClick={() => switchTab('login')}
+                    className={`min-h-[44px] rounded-lg text-sm font-bold whitespace-nowrap transition-all ${
+                      activeTab === 'login'
+                        ? 'gold-button shadow-md'
+                        : 'text-zinc-300 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    Login
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === 'signup'}
+                    onClick={() => switchTab('signup')}
+                    className={`min-h-[44px] rounded-lg text-sm font-bold whitespace-nowrap transition-all ${
+                      activeTab === 'signup'
+                        ? 'gold-button shadow-md'
+                        : 'text-zinc-300 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    Sign Up
+                  </button>
+                </div>
+
+                {activeTab === 'login' ? (
+                  <form onSubmit={(e) => void handleLoginSubmit(e)} noValidate className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label htmlFor="auth-login-id" className="block text-xs font-medium text-zinc-300">
+                        Mobile Number (+91) or Email
+                      </label>
+                      <div className="relative flex items-center">
+                        <Phone className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
+                        <input
+                          id="auth-login-id"
+                          type="text"
+                          autoComplete="username"
+                          value={loginIdentifier}
+                          onChange={(e) => {
+                            setLoginIdentifier(e.target.value);
+                            if (errorMsg) setErrorMsg('');
+                          }}
+                          placeholder="9876543210 or player@example.com"
+                          className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label htmlFor="auth-login-pass" className="block text-xs font-medium text-zinc-300">
+                        Password
+                      </label>
+                      <div className="relative flex items-center">
+                        <Lock className="w-4 h-4 text-[#d4af37]/80 absolute left-3.5 pointer-events-none" aria-hidden="true" />
+                        <input
+                          id="auth-login-pass"
+                          type={showLoginPassword ? 'text' : 'password'}
+                          autoComplete="current-password"
+                          value={loginPassword}
+                          onChange={(e) => {
+                            setLoginPassword(e.target.value);
+                            if (errorMsg) setErrorMsg('');
+                          }}
+                          placeholder="Enter your password"
+                          className="w-full min-h-[46px] bg-black/55 border border-white/15 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#d4af37]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowLoginPassword((v) => !v)}
+                          aria-label={showLoginPassword ? 'Hide password' : 'Show password'}
+                          className="absolute right-1 min-w-[40px] min-h-[40px] flex items-center justify-center rounded-lg text-zinc-400 hover:text-[#f6dc93]"
+                        >
+                          {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      <div className="flex justify-end pt-0.5">
+                        <button
+                          type="button"
+                          onClick={openForgotPassword}
+                          className="text-xs font-medium text-[#f6dc93]/90 hover:text-[#fff3c4] hover:underline transition-colors"
+                        >
+                          Forgot Password?
+                        </button>
+                      </div>
+                    </div>
+
+                    {errorMsg && (
+                      <div
+                        role="alert"
+                        className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200 leading-relaxed"
+                      >
+                        {errorMsg}
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="w-full min-h-[48px] gold-button py-3 px-4 rounded-xl text-sm font-bold whitespace-nowrap disabled:opacity-50"
+                    >
+                      {busy ? 'Entering Arena...' : 'Login to Arena'}
+                    </button>
+                  </form>
+                ) : (
               <form onSubmit={(e) => void handleSignUpSubmit(e)} noValidate className="space-y-4">
                 <div className="space-y-1.5">
                   <label htmlFor="auth-signup-name" className="block text-xs font-medium text-zinc-300">
@@ -592,20 +1062,22 @@ export default function AuthPage() {
               </form>
             )}
 
-            <div className="relative flex items-center justify-center text-xs text-zinc-500">
-              <span className="w-full border-t border-white/10" />
-              <span className="px-3 bg-[#0e0a18] whitespace-nowrap">or</span>
-              <span className="w-full border-t border-white/10" />
-            </div>
+                <div className="relative flex items-center justify-center text-xs text-zinc-500">
+                  <span className="w-full border-t border-white/10" />
+                  <span className="px-3 bg-[#0e0a18] whitespace-nowrap">or</span>
+                  <span className="w-full border-t border-white/10" />
+                </div>
 
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void handleGoogleSignIn()}
-              className="w-full min-h-[44px] py-2.5 px-4 rounded-xl border border-[#d4af37]/35 bg-white/5 hover:bg-white/10 text-xs sm:text-sm font-semibold text-[#f6dc93] transition-colors whitespace-nowrap disabled:opacity-50"
-            >
-              Continue with Google
-            </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void handleGoogleSignIn()}
+                  className="w-full min-h-[44px] py-2.5 px-4 rounded-xl border border-[#d4af37]/35 bg-white/5 hover:bg-white/10 text-xs sm:text-sm font-semibold text-[#f6dc93] transition-colors whitespace-nowrap disabled:opacity-50"
+                >
+                  Continue with Google
+                </button>
+              </>
+            )}
           </div>
         </div>
 

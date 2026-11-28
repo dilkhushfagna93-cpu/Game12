@@ -75,18 +75,23 @@ const ROOT_ADMIN_EMAILS = new Set<string>(
 
 let FIREBASE_PROJECT_ID = (process.env.FIREBASE_PROJECT_ID || '').trim();
 let FIRESTORE_DATABASE_ID = (process.env.FIRESTORE_DATABASE_ID || '(default)').trim();
+let FIREBASE_WEB_API_KEY = (process.env.FIREBASE_WEB_API_KEY || '').trim();
 try {
   const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
   if (fs.existsSync(cfgPath)) {
     const parsedCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as {
       projectId?: string;
       firestoreDatabaseId?: string;
+      apiKey?: string;
     };
     if (!FIREBASE_PROJECT_ID && parsedCfg.projectId) {
       FIREBASE_PROJECT_ID = parsedCfg.projectId.trim();
     }
     if (parsedCfg.firestoreDatabaseId) {
       FIRESTORE_DATABASE_ID = parsedCfg.firestoreDatabaseId.trim();
+    }
+    if (!FIREBASE_WEB_API_KEY && parsedCfg.apiKey) {
+      FIREBASE_WEB_API_KEY = parsedCfg.apiKey.trim();
     }
   }
 } catch {
@@ -907,14 +912,63 @@ interface ServerAccountRecord {
   soundEnabled: boolean;
   musicEnabled: boolean;
   volume: number;
+  lastWithdrawalAtMs: number;
+  dailyWithdrawnDate: string;
+  dailyWithdrawnTotal: number;
   createdAtIso: string;
   updatedAtIso: string;
+}
+
+interface ServerWalletTxRecord {
+  txId: string;
+  userId: string;
+  type: string;
+  game: string;
+  bucket: string;
+  amount: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  description: string;
+  roundId: string;
+  createdAt: number;
+}
+
+interface ServerUpiRequestRecord {
+  requestId: string;
+  userId: string;
+  username: string;
+  type: 'deposit' | 'withdrawal';
+  amount: number;
+  upiId: string;
+  utr: string;
+  status: 'pending' | 'approved' | 'rejected';
+  payoutRef: string;
+  adminNote: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 const accountsByUid = new Map<string, ServerAccountRecord>();
 const uidByEmail = new Map<string, string>();
 const uidByMobile = new Map<string, string>();
 const authRateMap = new Map<string, { count: number; resetAtMs: number }>();
+const serverWalletTxByUid = new Map<string, ServerWalletTxRecord[]>();
+const serverUpiRequestsByUid = new Map<string, ServerUpiRequestRecord[]>();
+const serverPromoRedemptionsByUid = new Map<string, Set<string>>();
+
+function appendServerWalletTx(uid: string, tx: ServerWalletTxRecord): void {
+  const list = serverWalletTxByUid.get(uid) || [];
+  list.unshift(tx);
+  if (list.length > 200) list.length = 200;
+  serverWalletTxByUid.set(uid, list);
+}
+
+function appendServerUpiRequest(uid: string, reqRec: ServerUpiRequestRecord): void {
+  const list = serverUpiRequestsByUid.get(uid) || [];
+  list.unshift(reqRec);
+  if (list.length > 100) list.length = 100;
+  serverUpiRequestsByUid.set(uid, list);
+}
 
 function hashPasswordScrypt(password: string, saltHex?: string): { salt: string; hash: string } {
   const salt = saltHex || crypto.randomBytes(16).toString('hex');
@@ -1091,9 +1145,9 @@ function serializeAccount(acc: ServerAccountRecord) {
       referralCode: acc.referralCode,
       referredBy: acc.referredBy,
       referralRewardUnlocked: false,
-      lastWithdrawalAtMs: 0,
-      dailyWithdrawnDate: '',
-      dailyWithdrawnTotal: 0,
+      lastWithdrawalAtMs: acc.lastWithdrawalAtMs,
+      dailyWithdrawnDate: acc.dailyWithdrawnDate,
+      dailyWithdrawnTotal: acc.dailyWithdrawnTotal,
       graphicsQuality: 'ultra' as const,
       soundEnabled: acc.soundEnabled,
       musicEnabled: acc.musicEnabled,
@@ -1111,6 +1165,86 @@ function normalizeMobileInput(raw: string): string {
   if (digits.startsWith('+91')) return digits.slice(3);
   if (digits.startsWith('91') && digits.length === 12) return digits.slice(2);
   return digits;
+}
+
+const RECOVERY_TOKEN_TTL_MS = 5 * 60 * 1000;
+const usedRecoveryNonces = new Set<string>();
+
+function maskEmailAddress(email: string): string {
+  const [local, domain] = email.trim().split('@');
+  if (!local || !domain) return '***';
+  const visible = local.slice(0, Math.min(2, Math.max(1, local.length - 1)));
+  return `${visible}***@${domain}`;
+}
+
+function signRecoveryToken(uid: string): string {
+  const nonce = crypto.randomBytes(12).toString('hex');
+  const payloadObj = {
+    uid,
+    purpose: 'pw_reset',
+    nonce,
+    exp: Date.now() + RECOVERY_TOKEN_TTL_MS,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payloadObj), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', AUTH_SESSION_SECRET)
+    .update(`recover:${payloadB64}`)
+    .digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifyRecoveryToken(token: string): { uid: string; nonce: string } | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 2) return null;
+    const [payloadB64, sig] = parts;
+    if (!payloadB64 || !sig) return null;
+    const expectedSig = crypto
+      .createHmac('sha256', AUTH_SESSION_SECRET)
+      .update(`recover:${payloadB64}`)
+      .digest('base64url');
+    const sigBuf = Buffer.from(sig, 'utf8');
+    const expBuf = Buffer.from(expectedSig, 'utf8');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      uid?: string;
+      purpose?: string;
+      nonce?: string;
+      exp?: number;
+    };
+    if (
+      !parsed.uid ||
+      parsed.purpose !== 'pw_reset' ||
+      !parsed.nonce ||
+      typeof parsed.exp !== 'number' ||
+      Date.now() > parsed.exp ||
+      usedRecoveryNonces.has(parsed.nonce)
+    ) {
+      return null;
+    }
+    return { uid: parsed.uid, nonce: parsed.nonce };
+  } catch {
+    return null;
+  }
+}
+
+async function sendFirebasePasswordResetViaApi(email: string): Promise<boolean> {
+  if (!FIREBASE_WEB_API_KEY || !email) return false;
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestType: 'PASSWORD_RESET', email }),
+      },
+    );
+    return resp.ok;
+  } catch {
+    return false;
+  }
 }
 
 function makeServerReferralCode(uid: string): string {
@@ -1247,6 +1381,9 @@ async function startServer() {
       soundEnabled: true,
       musicEnabled: false,
       volume: 0.65,
+      lastWithdrawalAtMs: 0,
+      dailyWithdrawnDate: '',
+      dailyWithdrawnTotal: 0,
       createdAtIso: nowIso,
       updatedAtIso: nowIso,
     };
@@ -1334,6 +1471,166 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  // Password Recovery Step 1: Lookup mobile/email account without leaking unmasked PII
+  app.post('/api/auth/recover/lookup', async (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    if (!checkAuthRateLimit(req, res)) return;
+
+    const body = (req.body || {}) as { identifier?: unknown };
+    const rawId = String(body.identifier || '').trim();
+    if (!rawId) {
+      res.status(400).json({ ok: false, error: 'Enter your 10-digit mobile number or email address.' });
+      return;
+    }
+
+    if (rawId.includes('@')) {
+      const cleanEmail = rawId.toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleanEmail)) {
+        res.status(400).json({ ok: false, error: 'Enter a valid email address.' });
+        return;
+      }
+      const uid = uidByEmail.get(cleanEmail);
+      const account = uid ? accountsByUid.get(uid) : undefined;
+      res.json({
+        ok: true,
+        mode: 'email_server',
+        hasServerAccount: Boolean(account),
+      });
+      return;
+    }
+
+    const cleanMobile = normalizeMobileInput(rawId);
+    if (!/^\d{10}$/.test(cleanMobile)) {
+      res.status(400).json({ ok: false, error: 'Enter a valid 10-digit mobile number (+91) or email.' });
+      return;
+    }
+
+    const uid = uidByMobile.get(cleanMobile);
+    const account = uid ? accountsByUid.get(uid) : undefined;
+    if (!account) {
+      res.status(404).json({ ok: false, error: 'No account found with that 10-digit mobile number.' });
+      return;
+    }
+
+    if (account.email) {
+      const sent = await sendFirebasePasswordResetViaApi(account.email);
+      if (sent) {
+        res.json({
+          ok: true,
+          mode: 'email_linked',
+          maskedEmail: maskEmailAddress(account.email),
+        });
+        return;
+      }
+    }
+
+    res.json({
+      ok: true,
+      mode: 'verify_name',
+    });
+  });
+
+  // Password Recovery Step 2: Verify registered Full Name before issuing short-lived reset token
+  app.post('/api/auth/recover/verify-name', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    if (!checkAuthRateLimit(req, res)) return;
+
+    const body = (req.body || {}) as { identifier?: unknown; fullName?: unknown };
+    const rawId = String(body.identifier || '').trim();
+    const enteredName = String(body.fullName || '').replace(/[\r\n\t]/g, ' ').trim();
+
+    if (!rawId || enteredName.length < 2) {
+      res.status(400).json({ ok: false, error: 'Enter your registered full name to verify identity.' });
+      return;
+    }
+
+    let uid: string | undefined;
+    if (rawId.includes('@')) {
+      const cleanEmail = rawId.toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleanEmail)) {
+        res.status(400).json({ ok: false, error: 'Invalid email address.' });
+        return;
+      }
+      uid = uidByEmail.get(cleanEmail);
+    } else {
+      const cleanMobile = normalizeMobileInput(rawId);
+      if (!/^\d{10}$/.test(cleanMobile)) {
+        res.status(400).json({ ok: false, error: 'Invalid 10-digit mobile number.' });
+        return;
+      }
+      uid = uidByMobile.get(cleanMobile);
+    }
+
+    const account = uid ? accountsByUid.get(uid) : undefined;
+    if (!account || account.fullName.trim().toLowerCase() !== enteredName.toLowerCase()) {
+      res.status(401).json({
+        ok: false,
+        error: 'Registered full name did not match our records.',
+      });
+      return;
+    }
+
+    const recoveryToken = signRecoveryToken(account.uid);
+    res.json({ ok: true, recoveryToken });
+  });
+
+  // Password Recovery Step 3: Complete password reset using single-use HMAC recovery token
+  app.post('/api/auth/recover/complete', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    if (!checkAuthRateLimit(req, res)) return;
+
+    const body = (req.body || {}) as { recoveryToken?: unknown; newPassword?: unknown };
+    const token = String(body.recoveryToken || '').trim();
+    const newPassword = String(body.newPassword || '');
+
+    if (!token) {
+      res.status(400).json({ ok: false, error: 'Verification token is missing. Please restart password reset.' });
+      return;
+    }
+
+    if (newPassword.length < 6 || newPassword.length > 128) {
+      res.status(400).json({ ok: false, error: 'New password must be between 6 and 128 characters.' });
+      return;
+    }
+
+    const verified = verifyRecoveryToken(token);
+    if (!verified) {
+      res.status(401).json({
+        ok: false,
+        error: 'Password reset session expired or already used. Please verify again.',
+      });
+      return;
+    }
+
+    const account = accountsByUid.get(verified.uid);
+    if (!account) {
+      res.status(404).json({ ok: false, error: 'Account could not be found.' });
+      return;
+    }
+
+    usedRecoveryNonces.add(verified.nonce);
+    if (usedRecoveryNonces.size > 5000) {
+      const oldest = usedRecoveryNonces.values().next().value;
+      if (oldest) usedRecoveryNonces.delete(oldest);
+    }
+
+    const { salt, hash } = hashPasswordScrypt(newPassword);
+    account.passwordSalt = salt;
+    account.passwordHash = hash;
+    account.updatedAtIso = new Date().toISOString();
+
+    res.json({ ok: true });
+  });
+
   app.post('/api/account/profile', (req, res) => {
     if (!isSameOriginOrCustomHeader(req)) {
       res.status(403).json({ ok: false, error: 'Invalid request origin.' });
@@ -1414,15 +1711,35 @@ async function startServer() {
       return;
     }
 
+    const prevBalance = cashAvailable + account.bonusBalance;
     account.bonusBalance -= fromBonus;
     account.depositBalance -= fromDeposit;
     account.winningBalance -= fromWinning;
     account.totalWagered += wager;
     account.updatedAtIso = new Date().toISOString();
 
+    const nextBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+    const usedCount = (fromBonus > 0 ? 1 : 0) + (fromDeposit > 0 ? 1 : 0) + (fromWinning > 0 ? 1 : 0);
+    const bucket = usedCount > 1 ? 'mixed' : fromDeposit > 0 ? 'deposit' : fromWinning > 0 ? 'winning' : 'bonus';
+    const rawGame = String((req.body || {}).game || 'system').slice(0, 32);
+    const rawRound = String((req.body || {}).roundId || '').slice(0, 120);
+    appendServerWalletTx(account.uid, {
+      txId: `tx_bet_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      userId: account.uid,
+      type: 'bet',
+      game: rawGame || 'system',
+      bucket,
+      amount: -wager,
+      balanceBefore: prevBalance,
+      balanceAfter: nextBalance,
+      description: `Table bet (${rawGame || 'arena'})`,
+      roundId: rawRound || `bet_${Date.now()}`,
+      createdAt: Date.now(),
+    });
+
     res.json({
       ok: true,
-      nextBalance: account.depositBalance + account.winningBalance + account.bonusBalance,
+      nextBalance,
       user: serializeAccount(account),
     });
   });
@@ -1445,13 +1762,17 @@ async function startServer() {
     const betAmount = Math.max(0, Math.round(Number(body.betAmount) || 0));
     const payout = Math.max(0, Math.min(10_000_000, Math.round(Number(body.payout) || 0)));
     const isTieRefund = body.outcome === 'tie' && payout === betAmount;
+    const prevBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+    let credited = payout;
 
     if (isTieRefund) {
       account.depositBalance += payout;
     } else if (payout > 0) {
       const capPreDeposit = account.totalDeposited < MIN_FIRST_DEPOSIT_FOR_WITHDRAW;
       if (capPreDeposit) {
-        account.winningBalance = Math.min(BONUS_PRE_DEPOSIT_WIN_CAP, account.winningBalance + payout);
+        const nextWin = Math.min(BONUS_PRE_DEPOSIT_WIN_CAP, account.winningBalance + payout);
+        credited = Math.max(0, nextWin - account.winningBalance);
+        account.winningBalance = nextWin;
       } else {
         account.winningBalance += payout;
       }
@@ -1467,9 +1788,26 @@ async function startServer() {
     account.monthlyScore += payout;
     account.updatedAtIso = new Date().toISOString();
 
+    const nextBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+    if (credited > 0) {
+      appendServerWalletTx(account.uid, {
+        txId: `tx_win_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+        userId: account.uid,
+        type: isTieRefund ? 'refund' : 'win',
+        game: 'system',
+        bucket: isTieRefund ? 'deposit' : 'winning',
+        amount: credited,
+        balanceBefore: prevBalance,
+        balanceAfter: nextBalance,
+        description: isTieRefund ? 'Tie refund credited' : `Round win payout (+${credited.toLocaleString()})`,
+        roundId: `settle_${Date.now()}`,
+        createdAt: Date.now(),
+      });
+    }
+
     res.json({
       ok: true,
-      nextBalance: account.depositBalance + account.winningBalance + account.bonusBalance,
+      nextBalance,
       user: serializeAccount(account),
     });
   });
@@ -1492,17 +1830,32 @@ async function startServer() {
     }
     const nextStreak = account.lastDailyClaimDate === yesterday ? account.streakDays + 1 : 1;
     const reward = AUTH_STREAK_REWARDS[(nextStreak - 1) % AUTH_STREAK_REWARDS.length];
+    const prevBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
     account.lastDailyClaimDate = today;
     account.streakDays = nextStreak;
     account.bonusBalance += reward;
     account.weeklyScore += reward;
     account.monthlyScore += reward;
     account.updatedAtIso = new Date().toISOString();
+    const nextBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+    appendServerWalletTx(account.uid, {
+      txId: `tx_daily_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      userId: account.uid,
+      type: 'daily_reward',
+      game: 'system',
+      bucket: 'bonus',
+      amount: reward,
+      balanceBefore: prevBalance,
+      balanceAfter: nextBalance,
+      description: `Day ${nextStreak} check-in reward (+${reward} Bonus Coins)`,
+      roundId: `daily_${today}`,
+      createdAt: Date.now(),
+    });
     res.json({
       ok: true,
       reward,
       streakDays: nextStreak,
-      nextBalance: account.depositBalance + account.winningBalance + account.bonusBalance,
+      nextBalance,
       user: serializeAccount(account),
     });
   });
@@ -2806,6 +3159,326 @@ async function startServer() {
       minDeposit: resolvedMinDep,
       description: resolvedDesc,
       proofHash,
+    });
+  });
+
+  // Authenticated Account Wallet Endpoints (for Mobile / Email+Password Session Accounts)
+  app.get('/api/account/wallet', (req, res) => {
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      transactions: serverWalletTxByUid.get(account.uid) || [],
+      upiRequests: serverUpiRequestsByUid.get(account.uid) || [],
+    });
+  });
+
+  app.post('/api/account/upi/deposit', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+
+    const body = (req.body || {}) as { amount?: unknown; utr?: unknown; upiId?: unknown; senderUpiId?: unknown };
+    const numAmount = Math.round(Number(body.amount));
+    if (!Number.isFinite(numAmount) || numAmount < 100 || numAmount > 100000) {
+      res.status(400).json({ ok: false, error: 'Deposit amount must be between 100 and 100,000 coins.' });
+      return;
+    }
+
+    const rawUpi = String(body.senderUpiId ?? body.upiId ?? '').trim().toLowerCase();
+    const hasOptionalUpi = rawUpi.length > 0 && rawUpi !== 'n/a';
+    if (hasOptionalUpi && !UPI_ID_REGEX.test(rawUpi)) {
+      res.status(400).json({ ok: false, error: 'Enter a valid UPI ID (e.g. player@upi or name@okaxis).' });
+      return;
+    }
+
+    const cleanUtr = String(body.utr || '').trim();
+    if (!UTR_REGEX.test(cleanUtr)) {
+      res.status(400).json({ ok: false, error: 'UTR must be an exact 12-digit numeric reference number.' });
+      return;
+    }
+    if (seenUtrs.has(cleanUtr)) {
+      res.status(409).json({ ok: false, error: 'Duplicate UTR detected. This UTR number has already been submitted.' });
+      return;
+    }
+    seenUtrs.add(cleanUtr);
+
+    const nowMs = Date.now();
+    const requestRecord: ServerUpiRequestRecord = {
+      requestId: `upi_dep_${nowMs}_${crypto.randomBytes(4).toString('hex')}`,
+      userId: account.uid,
+      username: account.username.slice(0, 32),
+      type: 'deposit',
+      amount: numAmount,
+      upiId: hasOptionalUpi ? rawUpi : 'N/A',
+      utr: cleanUtr,
+      status: 'pending',
+      payoutRef: '',
+      adminNote: '',
+      createdAt: nowMs,
+      updatedAt: nowMs,
+    };
+
+    appendServerUpiRequest(account.uid, requestRecord);
+    res.json({ ok: true, request: requestRecord });
+  });
+
+  app.post('/api/account/upi/withdraw', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+
+    const body = (req.body || {}) as { amount?: unknown; upiId?: unknown };
+    const numAmount = Math.round(Number(body.amount));
+    const cleanUpi = String(body.upiId || '').trim().toLowerCase();
+
+    if (
+      platformLiquidityConfig.requireFirstDepositToWithdraw &&
+      account.totalDeposited < MIN_FIRST_DEPOSIT_FOR_WITHDRAW
+    ) {
+      res.status(403).json({
+        ok: false,
+        error: 'Make a minimum ₹100 first deposit to unlock instant UPI withdrawals',
+      });
+      return;
+    }
+
+    if (!UPI_ID_REGEX.test(cleanUpi)) {
+      res.status(400).json({ ok: false, error: 'Enter a valid UPI ID (e.g. player@upi or name@okaxis).' });
+      return;
+    }
+    if (!Number.isFinite(numAmount) || numAmount < 500 || numAmount > 25000) {
+      res.status(400).json({ ok: false, error: 'Withdrawal amount must be between 500 and 25,000 coins.' });
+      return;
+    }
+    if (account.winningBalance < numAmount) {
+      res.status(400).json({
+        ok: false,
+        error: `Insufficient Winning Balance. Only Winning Balance (${account.winningBalance.toLocaleString()} coins) is eligible for withdrawal.`,
+      });
+      return;
+    }
+
+    const nowMs = Date.now();
+    const today = todayDateKey();
+    if (account.lastWithdrawalAtMs > 0 && nowMs < account.lastWithdrawalAtMs + UPI_WITHDRAWAL_COOLDOWN_MS) {
+      const waitSec = Math.ceil((account.lastWithdrawalAtMs + UPI_WITHDRAWAL_COOLDOWN_MS - nowMs) / 1000);
+      res.status(429).json({
+        ok: false,
+        error: `Withdrawal cooldown active. Please wait ${waitSec}s before requesting again.`,
+      });
+      return;
+    }
+
+    const prevDaily = account.dailyWithdrawnDate === today ? account.dailyWithdrawnTotal : 0;
+    const nextDaily = prevDaily + numAmount;
+    if (nextDaily > UPI_DAILY_WITHDRAWAL_LIMIT) {
+      const rem = Math.max(0, UPI_DAILY_WITHDRAWAL_LIMIT - prevDaily);
+      res.status(429).json({
+        ok: false,
+        error: `Daily withdrawal limit (50,000) exceeded. Remaining today: ${rem.toLocaleString()} coins.`,
+      });
+      return;
+    }
+
+    const prevBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+    account.winningBalance -= numAmount;
+    account.lastWithdrawalAtMs = nowMs;
+    account.dailyWithdrawnDate = today;
+    account.dailyWithdrawnTotal = nextDaily;
+    account.updatedAtIso = new Date().toISOString();
+    const nextBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+
+    const requestRecord: ServerUpiRequestRecord = {
+      requestId: `upi_wd_${nowMs}_${crypto.randomBytes(4).toString('hex')}`,
+      userId: account.uid,
+      username: account.username.slice(0, 32),
+      type: 'withdrawal',
+      amount: numAmount,
+      upiId: cleanUpi,
+      utr: '',
+      status: 'pending',
+      payoutRef: '',
+      adminNote: '',
+      createdAt: nowMs,
+      updatedAt: nowMs,
+    };
+    appendServerUpiRequest(account.uid, requestRecord);
+    appendServerWalletTx(account.uid, {
+      txId: `tx_wd_${nowMs}_${crypto.randomBytes(4).toString('hex')}`,
+      userId: account.uid,
+      type: 'withdrawal_request',
+      game: 'system',
+      bucket: 'winning',
+      amount: -numAmount,
+      balanceBefore: prevBalance,
+      balanceAfter: nextBalance,
+      description: `UPI withdrawal request to ${cleanUpi}`,
+      roundId: requestRecord.requestId,
+      createdAt: nowMs,
+    });
+
+    res.json({
+      ok: true,
+      request: requestRecord,
+      nextBalance,
+      user: serializeAccount(account),
+    });
+  });
+
+  app.post('/api/account/promo/redeem', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+
+    const nowMs = Date.now();
+    const rateEntry = promoAttemptMap.get(account.uid);
+    if (rateEntry && nowMs < rateEntry.resetAtMs && rateEntry.count >= 12) {
+      res.status(429).json({
+        ok: false,
+        error: 'Too many promo code attempts. Please wait a minute and try again.',
+      });
+      return;
+    }
+    if (!rateEntry || nowMs >= rateEntry.resetAtMs) {
+      promoAttemptMap.set(account.uid, { count: 1, resetAtMs: nowMs + 60_000 });
+    } else {
+      rateEntry.count += 1;
+    }
+
+    const body = (req.body || {}) as { code?: unknown; depositAmount?: unknown };
+    const normalizedCode = String(body.code || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+    if (!/^[A-Z0-9]{3,24}$/.test(normalizedCode)) {
+      res.status(400).json({ ok: false, error: 'Promo code must be 3–24 letters or numbers.' });
+      return;
+    }
+
+    const promo = BUILTIN_PROMOS[normalizedCode];
+    if (!promo) {
+      res.status(404).json({
+        ok: false,
+        error: 'Promo code not found. Try WELCOME500, AURELIA1000, or VIP2500.',
+      });
+      return;
+    }
+
+    const depAmt = Math.max(0, Math.round(Number(body.depositAmount) || 0));
+    if (promo.minDeposit > 0 && depAmt < promo.minDeposit) {
+      res.status(400).json({
+        ok: false,
+        error: `Minimum deposit amount of ${promo.minDeposit.toLocaleString()} coins required for ${normalizedCode}.`,
+      });
+      return;
+    }
+
+    const redeemedSet = serverPromoRedemptionsByUid.get(account.uid) || new Set<string>();
+    if (redeemedSet.has(normalizedCode)) {
+      res.status(409).json({
+        ok: false,
+        error: `Promo code ${normalizedCode} has already been redeemed on your account.`,
+      });
+      return;
+    }
+    redeemedSet.add(normalizedCode);
+    serverPromoRedemptionsByUid.set(account.uid, redeemedSet);
+
+    const prevBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+    const granted = Math.min(promo.bonusAmount, Math.max(0, 100_000_000 - prevBalance));
+    account.bonusBalance += granted;
+    account.updatedAtIso = new Date().toISOString();
+    const nextBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+
+    appendServerWalletTx(account.uid, {
+      txId: `tx_promo_${nowMs}_${crypto.randomBytes(4).toString('hex')}`,
+      userId: account.uid,
+      type: 'promo_bonus',
+      game: 'system',
+      bucket: 'bonus',
+      amount: granted,
+      balanceBefore: prevBalance,
+      balanceAfter: nextBalance,
+      description: `Promo ${normalizedCode}: ${promo.description}`,
+      roundId: `${normalizedCode}_${account.uid}`,
+      createdAt: nowMs,
+    });
+
+    res.json({
+      ok: true,
+      code: normalizedCode,
+      bonusAmount: granted,
+      nextBalance,
+      description: promo.description,
+      user: serializeAccount(account),
+    });
+  });
+
+  app.post('/api/account/refill', (req, res) => {
+    if (!isSameOriginOrCustomHeader(req)) {
+      res.status(403).json({ ok: false, error: 'Invalid request origin.' });
+      return;
+    }
+    const account = resolveSessionAccount(req);
+    if (!account) {
+      res.status(401).json({ ok: false, error: 'Authentication required.' });
+      return;
+    }
+
+    const prevBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+    if (prevBalance >= 1000) {
+      res.status(400).json({
+        ok: false,
+        error: 'Free refill is available when total balance is below 1,000 coins',
+      });
+      return;
+    }
+
+    const grant = 2500;
+    account.depositBalance += grant;
+    account.updatedAtIso = new Date().toISOString();
+    const nextBalance = account.depositBalance + account.winningBalance + account.bonusBalance;
+
+    appendServerWalletTx(account.uid, {
+      txId: `tx_refill_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      userId: account.uid,
+      type: 'free_refill',
+      game: 'system',
+      bucket: 'deposit',
+      amount: grant,
+      balanceBefore: prevBalance,
+      balanceAfter: nextBalance,
+      description: 'Free playable coin refill (+2,500)',
+      roundId: `refill_${Date.now()}`,
+      createdAt: Date.now(),
+    });
+
+    res.json({
+      ok: true,
+      nextBalance,
+      user: serializeAccount(account),
     });
   });
 

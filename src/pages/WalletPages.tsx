@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -27,17 +27,11 @@ import { useApp } from '../context/AppContext';
 import { soundEngine } from '../services/soundEngine';
 import {
   buildUpiPaymentIntentUrl,
-  claimLowBalanceRefill,
   DEFAULT_DEPOSIT_UPI_NAME,
   fetchGameHistory,
-  fetchUserTransactions,
-  fetchUserUpiRequests,
   getTimeMs,
   getTodayUtcDateKey,
-  redeemPromoCode,
   resolveActiveDepositUpi,
-  submitUpiDepositRequest,
-  submitUpiWithdrawalRequest,
   UPI_DAILY_WITHDRAWAL_LIMIT,
   UPI_WITHDRAWAL_COOLDOWN_MS,
 } from '../services/walletService';
@@ -417,7 +411,7 @@ function UpiStatusTimelineCard({ req }: { req: UpiRequestRecord }) {
 
 export function WalletPage() {
   const {
-    firebaseUser,
+    isAuthenticated,
     profile,
     privateUser,
     balance,
@@ -426,9 +420,20 @@ export function WalletPage() {
     bonusBalance,
     gameConfigs,
     platformSettings,
-    isGuestMode,
+    fetchAccountWalletFeed,
+    submitAccountDeposit,
+    submitAccountWithdrawal,
+    redeemAccountPromo,
+    claimAccountRefill,
     pushToast,
   } = useApp();
+
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const directUpiDeskRef = useRef<HTMLDivElement | null>(null);
+  const shouldOpenDepositDesk =
+    searchParams.get('tab') === 'deposit' ||
+    Boolean((location.state as { openDepositDesk?: boolean } | null)?.openDepositDesk);
 
   const totalDeposited = Math.max(0, Math.round(profile?.totalDeposited || 0));
   const hasCompletedFirstDeposit = totalDeposited >= 100;
@@ -439,7 +444,7 @@ export function WalletPage() {
   const [upiRequests, setUpiRequests] = useState<UpiRequestRecord[]>([]);
   const [refilling, setRefilling] = useState(false);
 
-  // Direct UPI Forms
+  // Direct UPI Forms — default to Deposit expanded and ready
   const [upiTab, setUpiTab] = useState<'deposit' | 'withdraw'>('deposit');
   const [depAmount, setDepAmount] = useState('1000');
   const [depUtr, setDepUtr] = useState('');
@@ -456,6 +461,18 @@ export function WalletPage() {
   const [timelineTab, setTimelineTab] = useState<'deposits' | 'withdrawals' | 'games'>('deposits');
   const [downloadingQr, setDownloadingQr] = useState(false);
   const [qrSaved, setQrSaved] = useState(false);
+
+  useEffect(() => {
+    if (shouldOpenDepositDesk || balance <= 0) {
+      setUpiTab('deposit');
+    }
+    if (shouldOpenDepositDesk) {
+      const timer = window.setTimeout(() => {
+        directUpiDeskRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 90);
+      return () => window.clearTimeout(timer);
+    }
+  }, [shouldOpenDepositDesk, balance]);
 
   const activePlatformUpi = resolveActiveDepositUpi(gameConfigs.platform.depositUpiId);
   const activeMerchantName = gameConfigs.platform.depositUpiName || DEFAULT_DEPOSIT_UPI_NAME;
@@ -488,14 +505,11 @@ export function WalletPage() {
   };
 
   const loadWalletFeed = useCallback(async () => {
-    if (!firebaseUser || isGuestMode) return;
-    const [txs, reqs] = await Promise.all([
-      fetchUserTransactions(firebaseUser.uid, 30).catch(() => []),
-      fetchUserUpiRequests(firebaseUser.uid).catch(() => []),
-    ]);
-    setRecentTx(txs);
-    setUpiRequests(reqs);
-  }, [firebaseUser, isGuestMode]);
+    if (!isAuthenticated) return;
+    const feed = await fetchAccountWalletFeed().catch(() => ({ transactions: [], upiRequests: [] }));
+    setRecentTx(feed.transactions);
+    setUpiRequests(feed.upiRequests);
+  }, [fetchAccountWalletFeed, isAuthenticated]);
 
   useEffect(() => {
     void loadWalletFeed();
@@ -529,12 +543,13 @@ export function WalletPage() {
   );
 
   const handleRefill = async () => {
-    if (!firebaseUser || isGuestMode) return;
+    if (!isAuthenticated) return;
     setRefilling(true);
     try {
-      await claimLowBalanceRefill(firebaseUser.uid);
+      await claimAccountRefill();
       soundEngine.playCoinReward();
       pushToast('Added +2,500 free playable virtual coins!', 'emerald');
+      await loadWalletFeed();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : 'Unable to claim refill', 'gold');
     } finally {
@@ -544,15 +559,14 @@ export function WalletPage() {
 
   const handleRedeemPromo = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firebaseUser || !profile || isGuestMode) {
-      pushToast('Sign in with Google to redeem promo codes.', 'gold');
+    if (!isAuthenticated || !profile) {
+      pushToast('Please log in to redeem promo codes.', 'gold');
       return;
     }
     if (!promoCodeInput.trim()) return;
     setRedeemingPromo(true);
     try {
-      const res = await redeemPromoCode({
-        uid: firebaseUser.uid,
+      const res = await redeemAccountPromo({
         code: promoCodeInput,
         depositAmount: Number(depAmount) || 0,
       });
@@ -572,15 +586,13 @@ export function WalletPage() {
 
   const handleUpiDepositSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firebaseUser || !profile || isGuestMode) {
-      pushToast('Sign in with Google to submit Direct UPI requests.', 'gold');
+    if (!isAuthenticated || !profile) {
+      pushToast('Please log in to submit Direct UPI requests.', 'gold');
       return;
     }
     setSubmittingUpi(true);
     try {
-      await submitUpiDepositRequest({
-        uid: firebaseUser.uid,
-        username: profile.username,
+      await submitAccountDeposit({
         amount: Number(depAmount),
         utr: depUtr,
       });
@@ -598,8 +610,8 @@ export function WalletPage() {
 
   const handleUpiWithdrawSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firebaseUser || !profile || isGuestMode) {
-      pushToast('Sign in with Google to request withdrawals.', 'gold');
+    if (!isAuthenticated || !profile) {
+      pushToast('Please log in to request withdrawals.', 'gold');
       return;
     }
     if (withdrawalLockedByFirstDeposit) {
@@ -608,12 +620,9 @@ export function WalletPage() {
     }
     setSubmittingUpi(true);
     try {
-      await submitUpiWithdrawalRequest({
-        uid: firebaseUser.uid,
-        username: profile.username,
+      await submitAccountWithdrawal({
         amount: Number(wdAmount),
         upiId: wdUpiId,
-        totalDeposited,
       });
       soundEngine.playClick();
       pushToast('Withdrawal request queued atomically from Winning Balance.', 'emerald');
@@ -690,7 +699,7 @@ export function WalletPage() {
           </div>
           <p className="text-[11px] text-zinc-400 leading-relaxed">
             Earned strictly from verified game wins and Aviator cash-outs.{' '}
-            {!isGuestMode && !hasCompletedFirstDeposit
+            {isAuthenticated && !hasCompletedFirstDeposit
               ? 'Capped at ₹200 until your first ₹100+ deposit unlocks unlimited withdrawals.'
               : 'Playable & instantly withdrawable via UPI.'}
           </p>
@@ -726,11 +735,7 @@ export function WalletPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {isGuestMode ? (
-            <Link to="/register" className="gold-button px-5 py-2.5 rounded-xl text-sm font-bold">
-              Sign In to Unlock UPI & Cloud Wallet
-            </Link>
-          ) : (
+          {isAuthenticated ? (
             <button
               type="button"
               disabled={refilling || balance >= 1000}
@@ -742,13 +747,19 @@ export function WalletPage() {
                 {balance < 1000 ? 'Claim Free +2,500 Refill' : 'Free Refill Below 1,000'}
               </span>
             </button>
-          )}
+          ) : null}
         </div>
       </div>
 
       {/* Direct UPI Deposit & Withdrawal Desk + Visual Status Timeline */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-6 surface-panel rounded-2xl p-6 space-y-5">
+      <div ref={directUpiDeskRef} className="grid grid-cols-1 lg:grid-cols-12 gap-6 scroll-mt-20">
+        <div
+          className={`lg:col-span-6 surface-panel rounded-2xl p-6 space-y-5 ${
+            shouldOpenDepositDesk || balance <= 0
+              ? 'ring-1 ring-[#d4af37]/50 shadow-[0_0_32px_rgba(212,175,55,0.12)]'
+              : ''
+          }`}
+        >
           <div className="flex items-center justify-between gap-2">
             <h2 className="font-display text-xl font-bold text-[#faf6ee]">Direct UPI Desk</h2>
             <div className="inline-flex bg-black/60 border border-white/10 rounded-xl p-1 text-xs">
@@ -773,15 +784,20 @@ export function WalletPage() {
             </div>
           </div>
 
-          {isGuestMode ? (
-            <div className="p-5 rounded-xl bg-black/40 border border-white/10 text-sm text-zinc-400 text-center space-y-3">
-              <p>Sign in with a verified account to submit Direct UPI Deposit UTRs, redeem Promo Codes, or withdraw Winning Balance.</p>
-              <Link to="/login" className="gold-button inline-block px-5 py-2 rounded-xl text-xs font-bold">
-                Sign In Now
-              </Link>
+          {!isAuthenticated ? (
+            <div className="p-5 rounded-xl bg-black/40 border border-white/10 text-sm text-zinc-400 text-center">
+              Please wait while your Aurelia Arena account session syncs...
             </div>
           ) : upiTab === 'deposit' ? (
             <div className="space-y-5">
+              {balance <= 0 && (
+                <div className="rounded-xl bg-[#d4af37]/12 border border-[#d4af37]/35 px-3.5 py-2.5 text-xs text-[#f6dc93] flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-[#f6dc93] shrink-0" />
+                  <span>
+                    Your balance is ₹0 — complete a Direct UPI Deposit below to unlock all tables instantly.
+                  </span>
+                </div>
+              )}
               {/* UPI QR Code + Direct Pay via UPI App Deep Link */}
               <div className="rounded-2xl bg-black/50 border border-[#d4af37]/30 p-4 flex flex-col sm:flex-row items-center gap-4">
                 <UpiQrPreview
@@ -1089,9 +1105,9 @@ export function WalletPage() {
             ))}
           </div>
 
-          {isGuestMode ? (
+          {!isAuthenticated ? (
             <p className="text-sm text-zinc-400 py-10 text-center">
-              Sign in to track your Direct UPI deposits, payout references, and live status timeline.
+              Loading your Direct UPI deposits, payout references, and live status timeline...
             </p>
           ) : timelineTab === 'deposits' ? (
             depositRequests.length === 0 ? (
@@ -1162,9 +1178,9 @@ export function WalletPage() {
           </Link>
         </div>
 
-        {isGuestMode ? (
+        {!isAuthenticated ? (
           <p className="text-sm text-zinc-400 py-6 text-center">
-            Sign in with Google to record and audit your virtual coin transactions in Cloud Firestore.
+            Syncing your virtual coin transactions...
           </p>
         ) : recentTx.length === 0 ? (
           <p className="text-sm text-zinc-400 py-6 text-center">
@@ -1213,28 +1229,25 @@ export function WalletPage() {
 }
 
 export function TransactionsPage() {
-  const { firebaseUser, isGuestMode } = useApp();
+  const { isAuthenticated, fetchAccountWalletFeed } = useApp();
   const [rows, setRows] = useState<WalletTransaction[]>([]);
   const [upiRequests, setUpiRequests] = useState<UpiRequestRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [section, setSection] = useState<'deposits' | 'withdrawals' | 'games' | 'all'>('deposits');
 
   useEffect(() => {
-    if (!firebaseUser || isGuestMode) {
+    if (!isAuthenticated) {
       setLoading(false);
       return;
     }
     setLoading(true);
-    void Promise.all([
-      fetchUserTransactions(firebaseUser.uid, 120).catch(() => []),
-      fetchUserUpiRequests(firebaseUser.uid).catch(() => []),
-    ])
-      .then(([txs, reqs]) => {
-        setRows(txs);
-        setUpiRequests(reqs);
+    void fetchAccountWalletFeed()
+      .then((feed) => {
+        setRows(feed.transactions);
+        setUpiRequests(feed.upiRequests);
       })
       .finally(() => setLoading(false));
-  }, [firebaseUser, isGuestMode]);
+  }, [fetchAccountWalletFeed, isAuthenticated]);
 
   const deposits = useMemo(() => upiRequests.filter((r) => r.type === 'deposit'), [upiRequests]);
   const withdrawals = useMemo(() => upiRequests.filter((r) => r.type === 'withdrawal'), [upiRequests]);
@@ -1284,12 +1297,9 @@ export function TransactionsPage() {
       </div>
 
       <div className="surface-panel rounded-2xl p-6">
-        {isGuestMode ? (
-          <div className="py-12 text-center space-y-3">
-            <p className="text-sm text-zinc-400">Sign in to inspect your cloud virtual coin transactions and UPI timeline.</p>
-            <Link to="/login" className="gold-button inline-block px-5 py-2.5 rounded-xl text-sm font-bold">
-              Log In
-            </Link>
+        {!isAuthenticated ? (
+          <div className="py-12 text-center text-sm text-zinc-400">
+            Syncing your transaction timeline...
           </div>
         ) : loading ? (
           <div className="py-12 text-center text-sm text-zinc-400">Loading timeline & ledger...</div>
@@ -1374,19 +1384,20 @@ export function TransactionsPage() {
 }
 
 export function GameHistoryPage() {
-  const { firebaseUser, isGuestMode } = useApp();
+  const { firebaseUser, profile, isAuthenticated } = useApp();
   const [rows, setRows] = useState<GameHistoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [gameFilter, setGameFilter] = useState<'all' | 'dragon_tiger' | 'ludo' | 'aviator' | 'teen_patti'>('all');
-  const [scope, setScope] = useState<'mine' | 'global'>(firebaseUser ? 'mine' : 'global');
+  const [scope, setScope] = useState<'mine' | 'global'>(isAuthenticated ? 'mine' : 'global');
 
   useEffect(() => {
     setLoading(true);
-    const uid = scope === 'mine' && firebaseUser && !isGuestMode ? firebaseUser.uid : undefined;
+    const activeUid = firebaseUser?.uid || profile?.uid;
+    const uid = scope === 'mine' && activeUid && isAuthenticated ? activeUid : undefined;
     void fetchGameHistory(uid, 80)
       .then(setRows)
       .finally(() => setLoading(false));
-  }, [firebaseUser, isGuestMode, scope]);
+  }, [firebaseUser, isAuthenticated, profile?.uid, scope]);
 
   const filtered =
     gameFilter === 'all' ? rows : rows.filter((r) => r.game === gameFilter);
@@ -1402,7 +1413,7 @@ export function GameHistoryPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {!isGuestMode && (
+          {isAuthenticated && (
             <div className="inline-flex bg-black/50 border border-white/10 rounded-xl p-1 text-xs">
               <button
                 type="button"
